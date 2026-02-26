@@ -39,6 +39,7 @@ class OrderStatus(models.TextChoices):
     ACCEPTED = 'accepted', 'Accepted'
     RUNNING = 'running', 'Running'
     READY = 'ready', 'Ready'
+    SERVED = 'served', 'Served'
     REJECTED = 'rejected', 'Rejected'
 
 
@@ -93,16 +94,37 @@ class BulkNotificationType(models.TextChoices):
     WHATSAPP = 'whatsapp', 'WhatsApp'
 
 
+class WaiterCallStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    COMPLETED = 'completed', 'Completed'
+
+
+class DeliveryStatus(models.TextChoices):
+    ACCEPTED = 'accepted', 'Accepted'
+    RIDER_ASSIGNED = 'rider_assigned', 'Rider Assigned'
+    RIDER_PICKED_UP = 'rider_picked_up', 'Rider Picked Up'
+    ON_THE_WAY = 'on_the_way', 'On The Way'
+    DELIVERED = 'delivered', 'Delivered'
+    RETURNED = 'returned', 'Returned'
+
+
+class RiderSource(models.TextChoices):
+    IN_HOUSE = 'in_house', 'In House'
+    PATHAO = 'pathao', 'Pathao'
+    YANGO = 'yango', 'Yango'
+
+
 # --- Models ---
 
 class User(AbstractUser):
     """Custom user; id and password from AbstractUser."""
     name = models.CharField(max_length=255, blank=True)
-    phone = models.CharField(max_length=20, blank=True)
+    phone = models.CharField(max_length=20, blank=True, unique=True)
     country_code = models.CharField(max_length=10, blank=True)
     image = models.ImageField(upload_to='users/', blank=True, null=True)
     is_owner = models.BooleanField(default=False)
     is_restaurant_staff = models.BooleanField(default=False)
+    is_kitchen = models.BooleanField(default=False)
     kyc_status = models.CharField(
         max_length=20, choices=KycStatus.choices, default=KycStatus.PENDING
     )
@@ -121,6 +143,8 @@ class User(AbstractUser):
     fcm_token = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    
+    USERNAME_FIELD = 'phone'
 
     class Meta:
         db_table = 'core_user'
@@ -132,9 +156,18 @@ class User(AbstractUser):
 
 
 class Customer(models.Model):
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='customer_profile',
+    )
     name = models.CharField(max_length=255)
-    phone = models.CharField(max_length=20)
+    phone = models.CharField(max_length=20, unique=True)
+    country_code = models.CharField(max_length=10, blank=True)
     address = models.TextField(blank=True)
+    password = models.CharField(max_length=128, default='!')  # hashed; '!' = unusable for existing rows
     fcm_token = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -147,6 +180,22 @@ class Customer(models.Model):
         return f'{self.name} ({self.phone})'
 
 
+class CustomerToken(models.Model):
+    """Token for customer auth; separate from DRF Token (User)."""
+    customer = models.ForeignKey(
+        Customer, on_delete=models.CASCADE, related_name='tokens'
+    )
+    key = models.CharField(max_length=64, unique=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'core_customer_token'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'Token for {self.customer}'
+
+
 class Restaurant(models.Model):
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name='restaurants'
@@ -154,8 +203,22 @@ class Restaurant(models.Model):
     slug = models.SlugField(unique=True, max_length=100)
     name = models.CharField(max_length=255)
     phone = models.CharField(max_length=20, blank=True)
+    country_code = models.CharField(max_length=10, blank=True)
+    email = models.EmailField(blank=True)
     logo = models.ImageField(upload_to='restaurants/', blank=True, null=True)
     address = models.TextField(blank=True)
+    tax_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+        help_text='Tax percentage applied on subtotal for invoice (e.g. 13 for 13%%)'
+    )
+    latitude = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True,
+        help_text='Pickup point for delivery'
+    )
+    longitude = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True,
+        help_text='Pickup point for delivery'
+    )
     balance = models.DecimalField(
         max_digits=12, decimal_places=2, default=Decimal('0')
     )
@@ -163,6 +226,7 @@ class Restaurant(models.Model):
         max_digits=12, decimal_places=2, default=Decimal('0')
     )
     ug_api = models.CharField(max_length=255, blank=True, null=True)
+    esewa_merchant_id = models.CharField(max_length=255, blank=True, null=True, help_text='Esewa merchant ID for online payment QR')
     subscription_start = models.DateField(null=True, blank=True)
     subscription_end = models.DateField(null=True, blank=True)
     is_open = models.BooleanField(default=True)
@@ -212,6 +276,9 @@ class Vendor(models.Model):
     restaurant = models.ForeignKey(
         Restaurant, on_delete=models.CASCADE, related_name='vendors'
     )
+    role = models.CharField(max_length=100, blank=True)
+    phone = models.CharField(max_length=20, blank=True)
+    country_code = models.CharField(max_length=10, blank=True)
     image = models.ImageField(upload_to='vendors/', blank=True, null=True)
     to_pay = models.DecimalField(
         max_digits=12, decimal_places=2, default=Decimal('0')
@@ -339,6 +406,10 @@ class RawMaterial(models.Model):
     stock = models.DecimalField(
         max_digits=12, decimal_places=3, default=Decimal('0')
     )
+    min_stock = models.DecimalField(
+        max_digits=12, decimal_places=3, default=Decimal('0'), null=True, blank=True
+    )
+    image = models.ImageField(upload_to='raw_materials/', blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -365,6 +436,7 @@ class ProductRawMaterial(models.Model):
         RawMaterial, on_delete=models.CASCADE, related_name='product_links'
     )
     raw_material_quantity = models.DecimalField(max_digits=12, decimal_places=4)
+    image = models.ImageField(upload_to='recipe_mapping/', blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -381,6 +453,8 @@ class ComboSet(models.Model):
         Restaurant, on_delete=models.CASCADE, related_name='combo_sets'
     )
     name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    image = models.ImageField(upload_to='combos/', blank=True, null=True)
     products = models.ManyToManyField(
         Product, related_name='combo_sets', blank=True
     )
@@ -404,6 +478,7 @@ class Table(models.Model):
     capacity = models.PositiveIntegerField(default=0)
     floor = models.CharField(max_length=50, blank=True)
     near_by = models.CharField(max_length=255, blank=True)
+    notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -439,6 +514,9 @@ class Staff(models.Model):
     to_receive = models.DecimalField(
         max_digits=12, decimal_places=2, default=Decimal('0')
     )
+    assigned_tables = models.ManyToManyField(
+        'Table', related_name='assigned_waiters', blank=True
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -472,6 +550,14 @@ class Order(models.Model):
         max_length=20, choices=OrderType.choices, default=OrderType.TABLE
     )
     address = models.TextField(blank=True, null=True)
+    delivery_lat = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True,
+        help_text='Customer delivery location latitude'
+    )
+    delivery_lon = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True,
+        help_text='Customer delivery location longitude'
+    )
     status = models.CharField(
         max_length=20, choices=OrderStatus.choices, default=OrderStatus.PENDING
     )
@@ -490,7 +576,16 @@ class Order(models.Model):
     total = models.DecimalField(
         max_digits=12, decimal_places=2, default=Decimal('0')
     )
+    service_charge = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True, default=None
+    )
+    discount = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True, default=None,
+        help_text='Order-level discount amount'
+    )
+    transaction_reference = models.CharField(max_length=255, blank=True, null=True, help_text='Online payment transaction ID (e.g. Esewa)')
     reject_reason = models.TextField(blank=True)
+    table_number = models.CharField(max_length=64, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -532,6 +627,98 @@ class OrderItem(models.Model):
         return f'OrderItem #{self.id} (Order #{self.order_id})'
 
 
+class Rider(models.Model):
+    """In-house or third-party rider for delivery. Can be linked to User or standalone."""
+    name = models.CharField(max_length=255)
+    phone = models.CharField(max_length=20)
+    user = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='rider_deliveries'
+    )
+    is_available = models.BooleanField(default=True)
+    last_lat = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True
+    )
+    last_lon = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True
+    )
+    last_updated = models.DateTimeField(null=True, blank=True)
+    source = models.CharField(
+        max_length=20,
+        choices=RiderSource.choices,
+        default=RiderSource.IN_HOUSE
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'core_rider'
+        ordering = ['name']
+
+    def __str__(self):
+        return f'{self.name} ({self.phone})'
+
+
+class Delivery(models.Model):
+    """One-to-one with Order for delivery orders. Tracks rider, location, ETA."""
+    order = models.OneToOneField(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='delivery',
+        primary_key=True
+    )
+    rider = models.ForeignKey(
+        Rider,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='deliveries'
+    )
+    delivery_status = models.CharField(
+        max_length=20,
+        choices=DeliveryStatus.choices,
+        default=DeliveryStatus.ACCEPTED
+    )
+    pickup_lat = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True
+    )
+    pickup_lon = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True
+    )
+    delivery_lat = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True
+    )
+    delivery_lon = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True
+    )
+    rider_lat = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True
+    )
+    rider_lon = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True
+    )
+    assigned_at = models.DateTimeField(null=True, blank=True)
+    picked_up_at = models.DateTimeField(null=True, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    distance_km = models.DecimalField(
+        max_digits=8, decimal_places=2, null=True, blank=True
+    )
+    eta_minutes = models.PositiveIntegerField(null=True, blank=True)
+    third_party_request_id = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'core_delivery'
+        verbose_name_plural = 'Deliveries'
+
+    def __str__(self):
+        return f'Delivery for Order #{self.order_id}'
+
+
 class Feedback(models.Model):
     restaurant = models.ForeignKey(
         Restaurant, on_delete=models.CASCADE, related_name='feedbacks'
@@ -558,6 +745,36 @@ class Feedback(models.Model):
 
     def __str__(self):
         return f'Feedback #{self.id} ({self.rating})'
+
+
+class WaiterCall(models.Model):
+    restaurant = models.ForeignKey(
+        Restaurant, on_delete=models.CASCADE, related_name='waiter_calls'
+    )
+    table = models.ForeignKey(
+        Table, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='waiter_calls'
+    )
+    table_number = models.CharField(max_length=64, blank=True)
+    customer_name = models.CharField(max_length=255, blank=True)
+    message = models.TextField(blank=True)
+    status = models.CharField(
+        max_length=20, choices=WaiterCallStatus.choices,
+        default=WaiterCallStatus.PENDING
+    )
+    assigned_to = models.ForeignKey(
+        Staff, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='waiter_calls'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'core_waiter_call'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'WaiterCall #{self.id} ({self.restaurant.name})'
 
 
 class Purchase(models.Model):
@@ -629,6 +846,7 @@ class Expenses(models.Model):
     )
     description = models.TextField(blank=True)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    image = models.ImageField(upload_to='expenses/', blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -924,3 +1142,50 @@ class BulkNotification(models.Model):
 
     def __str__(self):
         return f'BulkNotification #{self.id} ({self.type})'
+
+
+class InAppNotification(models.Model):
+    """In-app notification: one sender, one recipient (user or customer)."""
+    sender = models.ForeignKey(
+        'User', on_delete=models.CASCADE, related_name='sent_in_app_notifications'
+    )
+    recipient_user = models.ForeignKey(
+        'User', on_delete=models.CASCADE, related_name='received_in_app_notifications',
+        null=True, blank=True
+    )
+    recipient_customer = models.ForeignKey(
+        Customer, on_delete=models.CASCADE, related_name='received_in_app_notifications',
+        null=True, blank=True
+    )
+    purpose = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'core_in_app_notification'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'InAppNotification #{self.id} from {self.sender_id}'
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if bool(self.recipient_user) == bool(self.recipient_customer):
+            raise ValidationError('Exactly one of recipient_user or recipient_customer must be set.')
+
+
+class HelpSupportEntry(models.Model):
+    """FAQ / Help & Support content. Ordered entries shown on Help page."""
+    title = models.CharField(max_length=255)
+    content = models.TextField(blank=True)
+    order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'core_help_support_entry'
+        ordering = ['order', 'id']
+
+    def __str__(self):
+        return self.title

@@ -12,22 +12,28 @@ from .models import (
     Order,
     OrderItem,
     OrderStatus,
+    PaymentStatus,
     ProductRawMaterial,
     Purchase,
     PurchaseItem,
+    QrStandOrder,
     RawMaterial,
     Restaurant,
     StockLog,
     StockLogType,
     SuperSetting,
+    Transaction,
+    TransactionCategory,
+    TransactionType,
     User,
     Vendor,
 )
 
 
-def get_or_create_customer_for_restaurant(restaurant, phone, name=None):
+def get_or_create_customer_for_restaurant(restaurant, phone, name=None, country_code=None):
     """
     Look up Customer by phone in this restaurant (via CustomerRestaurant).
+    If country_code is provided, lookup also matches country_code (same phone, different country = different customer).
     If not found, create Customer and CustomerRestaurant with zero to_pay/to_receive.
     Returns (customer, customer_restaurant).
     """
@@ -35,19 +41,26 @@ def get_or_create_customer_for_restaurant(restaurant, phone, name=None):
     if not phone:
         return None, None
 
-    cr = CustomerRestaurant.objects.filter(
+    cr_qs = CustomerRestaurant.objects.filter(
         restaurant=restaurant,
         customer__phone=phone,
-    ).select_related("customer").first()
+    )
+    if country_code is not None and country_code != "":
+        cr_qs = cr_qs.filter(customer__country_code=country_code)
+    cr = cr_qs.select_related("customer").first()
 
     if cr:
         return cr.customer, cr
 
-    customer = Customer.objects.filter(phone=phone).first()
+    customer_qs = Customer.objects.filter(phone=phone)
+    if country_code is not None and country_code != "":
+        customer_qs = customer_qs.filter(country_code=country_code)
+    customer = customer_qs.first()
     if not customer:
         customer = Customer.objects.create(
             name=name or phone,
             phone=phone,
+            country_code=country_code or "",
         )
     cr, _ = CustomerRestaurant.objects.get_or_create(
         customer=customer,
@@ -161,23 +174,41 @@ def deduct_stock_for_order(order):
 
 
 def record_whatsapp_usage(restaurant):
-    """Add SuperSetting whatsapp_per_usgage to restaurant.due_balance. Call from views when sending WhatsApp."""
+    """Add SuperSetting whatsapp_per_usgage to restaurant.due_balance and create system Transaction for dashboard revenue."""
     ss = get_super_setting()
     if not ss.is_whatsapp_usgage or not ss.whatsapp_per_usgage:
         return
     amount = ss.whatsapp_per_usgage
-    Restaurant.objects.filter(pk=restaurant.pk).update(
-        due_balance=F("due_balance") + amount
-    )
+    with transaction.atomic():
+        Restaurant.objects.filter(pk=restaurant.pk).update(
+            due_balance=F("due_balance") + amount
+        )
+        Transaction.objects.create(
+            restaurant=None,
+            amount=amount,
+            transaction_type=TransactionType.IN,
+            category=TransactionCategory.WHATSAPP_USAGE,
+            is_system=True,
+            remarks='WhatsApp usage',
+        )
 
 
 def record_transaction_fee_to_due(restaurant, fee_amount):
-    """Add fee_amount to restaurant.due_balance. Called when order is created and payment is success/paid."""
+    """Add fee_amount to restaurant.due_balance and create system Transaction for dashboard revenue."""
     if not fee_amount or fee_amount <= 0:
         return
-    Restaurant.objects.filter(pk=restaurant.pk).update(
-        due_balance=F("due_balance") + fee_amount
-    )
+    with transaction.atomic():
+        Restaurant.objects.filter(pk=restaurant.pk).update(
+            due_balance=F("due_balance") + fee_amount
+        )
+        Transaction.objects.create(
+            restaurant=None,
+            amount=fee_amount,
+            transaction_type=TransactionType.IN,
+            category=TransactionCategory.TRANSACTION_FEE,
+            is_system=True,
+            remarks='Transaction fee from order',
+        )
 
 
 def apply_share_distribution():
@@ -228,3 +259,101 @@ def apply_share_distribution():
             SuperSetting.objects.filter(pk=ss.pk).update(
                 balance=max(Decimal("0"), new_balance)
             )
+
+
+# --- Owner payment services (SuperSetting logic applied) ---
+
+
+def pay_subscription_fee(restaurant, amount=None):
+    """
+    Decrease restaurant.due_balance by amount; create Transaction (OUT, SUBSCRIPTION_FEE);
+    credit SuperSetting.balance. If amount is None, use SuperSetting.subscription_fee_per_month.
+    Idempotent: no-op if amount <= 0.
+    """
+    ss = get_super_setting()
+    amt = amount if amount is not None else (ss.subscription_fee_per_month or Decimal("0"))
+    amt = Decimal(str(amt)).quantize(Decimal("0.01"))
+    if amt <= 0:
+        return
+    with transaction.atomic():
+        Restaurant.objects.filter(pk=restaurant.pk).update(
+            due_balance=F("due_balance") - amt
+        )
+        Restaurant.objects.filter(pk=restaurant.pk, due_balance__lt=0).update(due_balance=Decimal("0"))
+        Transaction.objects.create(
+            restaurant=restaurant,
+            amount=amt,
+            transaction_type=TransactionType.OUT,
+            category=TransactionCategory.SUBSCRIPTION_FEE,
+            payment_status=PaymentStatus.PAID,
+            remarks="Subscription fee",
+        )
+        SuperSetting.objects.filter(pk=ss.pk).update(
+            balance=F("balance") + amt
+        )
+
+
+def pay_qr_stand_order(qr_stand_order):
+    """
+    Decrease restaurant.due_balance by order total; set QrStandOrder.payment_status=PAID;
+    create Transaction (OUT, QR_STAND_ORDER); credit SuperSetting.balance.
+    Idempotent: skip if already paid.
+    """
+    if qr_stand_order.payment_status == PaymentStatus.PAID:
+        return
+    amt = qr_stand_order.total
+    if amt <= 0:
+        return
+    ss = get_super_setting()
+    restaurant = qr_stand_order.restaurant
+    with transaction.atomic():
+        Restaurant.objects.filter(pk=restaurant.pk).update(
+            due_balance=F("due_balance") - amt
+        )
+        Restaurant.objects.filter(pk=restaurant.pk, due_balance__lt=0).update(due_balance=Decimal("0"))
+        QrStandOrder.objects.filter(pk=qr_stand_order.pk).update(
+            payment_status=PaymentStatus.PAID
+        )
+        Transaction.objects.create(
+            restaurant=restaurant,
+            amount=amt,
+            transaction_type=TransactionType.OUT,
+            category=TransactionCategory.QR_STAND_ORDER,
+            payment_status=PaymentStatus.PAID,
+            remarks=f"QR Stand Order #{qr_stand_order.id}",
+        )
+        SuperSetting.objects.filter(pk=ss.pk).update(
+            balance=F("balance") + amt
+        )
+
+
+def pay_due_balance(restaurant, amount):
+    """
+    Decrease restaurant.due_balance by amount (capped at current due_balance);
+    create Transaction (OUT, DUE_PAID); credit SuperSetting.balance.
+    """
+    amt = Decimal(str(amount)).quantize(Decimal("0.01"))
+    if amt <= 0:
+        return
+    restaurant.refresh_from_db()
+    current_due = restaurant.due_balance or Decimal("0")
+    pay_amt = min(amt, current_due)
+    if pay_amt <= 0:
+        return
+    ss = get_super_setting()
+    with transaction.atomic():
+        Restaurant.objects.filter(pk=restaurant.pk).update(
+            due_balance=F("due_balance") - pay_amt
+        )
+        Restaurant.objects.filter(pk=restaurant.pk, due_balance__lt=0).update(due_balance=Decimal("0"))
+        Transaction.objects.create(
+            restaurant=restaurant,
+            amount=pay_amt,
+            transaction_type=TransactionType.OUT,
+            category=TransactionCategory.DUE_PAID,
+            payment_status=PaymentStatus.PAID,
+            remarks="Due balance paid",
+        )
+        SuperSetting.objects.filter(pk=ss.pk).update(
+            balance=F("balance") + pay_amt
+        )

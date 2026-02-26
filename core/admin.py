@@ -1,9 +1,11 @@
 from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+from django.contrib.auth.forms import UserCreationForm, UserChangeForm
 from . import services
 from .models import (
     User,
     Customer,
+    CustomerToken,
     CustomerRestaurant,
     Restaurant,
     Vendor,
@@ -18,6 +20,8 @@ from .models import (
     Staff,
     Order,
     OrderItem,
+    Rider,
+    Delivery,
     Feedback,
     Purchase,
     PurchaseItem,
@@ -56,8 +60,27 @@ class PurchaseItemInline(admin.TabularInline):
 
 # --- User (replace default auth User admin) ---
 
+
+class CustomUserCreationForm(UserCreationForm):
+    """Add form must declare custom fields so they render and save."""
+    class Meta(UserCreationForm.Meta):
+        model = User
+        fields = UserCreationForm.Meta.fields + (
+            'name', 'phone', 'country_code', 'is_owner', 'is_restaurant_staff',
+        )
+
+
+class CustomUserChangeForm(UserChangeForm):
+    """Edit form including all custom User model fields."""
+    class Meta:
+        model = User
+        fields = '__all__'
+
+
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
+    form = CustomUserChangeForm
+    add_form = CustomUserCreationForm
     list_display = (
         'username', 'name', 'phone', 'is_owner', 'is_restaurant_staff',
         'kyc_status', 'is_active', 'created_at'
@@ -68,7 +91,7 @@ class UserAdmin(BaseUserAdmin):
     readonly_fields = ('created_at', 'updated_at')
 
     fieldsets = BaseUserAdmin.fieldsets + (
-        (None, {
+        ('None', {
             'fields': (
                 'name', 'phone', 'country_code', 'image',
                 'is_owner', 'is_restaurant_staff', 'kyc_status', 'reject_reason',
@@ -79,7 +102,7 @@ class UserAdmin(BaseUserAdmin):
         }),
     )
     add_fieldsets = BaseUserAdmin.add_fieldsets + (
-        (None, {
+        ('None', {
             'fields': (
                 'name', 'phone', 'country_code', 'is_owner', 'is_restaurant_staff',
             )
@@ -89,9 +112,21 @@ class UserAdmin(BaseUserAdmin):
 
 @admin.register(Customer)
 class CustomerAdmin(admin.ModelAdmin):
-    list_display = ('name', 'phone', 'created_at')
+    list_display = ('name', 'phone', 'user', 'created_at')
     search_fields = ('name', 'phone')
-    readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('user',)
+    exclude = ('password',)
+
+
+@admin.register(CustomerToken)
+class CustomerTokenAdmin(admin.ModelAdmin):
+    list_display = ('id', 'customer', 'key_preview', 'created_at')
+    list_filter = ('created_at',)
+    search_fields = ('customer__name', 'customer__phone')
+    readonly_fields = ('created_at',)
+    def key_preview(self, obj):
+        return f'{obj.key[:12]}...' if obj.key and len(obj.key) > 12 else (obj.key or '')
+    key_preview.short_description = 'Key'
 
 
 @admin.register(CustomerRestaurant)
@@ -213,6 +248,20 @@ class OrderAdmin(admin.ModelAdmin):
     autocomplete_fields = ('customer', 'restaurant', 'table', 'waiter')
     inlines = (OrderItemInline,)
     readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(Rider)
+class RiderAdmin(admin.ModelAdmin):
+    list_display = ('id', 'name', 'phone', 'source', 'is_available', 'last_updated')
+    list_filter = ('source', 'is_available')
+    search_fields = ('name', 'phone')
+
+
+@admin.register(Delivery)
+class DeliveryAdmin(admin.ModelAdmin):
+    list_display = ('order_id', 'order', 'rider', 'delivery_status', 'distance_km', 'eta_minutes', 'created_at')
+    list_filter = ('delivery_status',)
+    raw_id_fields = ('order', 'rider')
 
 
 @admin.register(OrderItem)

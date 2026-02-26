@@ -24,6 +24,10 @@ from .models import (
     ReceivedRecord,
     ShareholderWithdrawal,
     Staff,
+    SuperSetting,
+    Transaction,
+    TransactionCategory,
+    TransactionType,
     User,
     Vendor,
     WithdrawalStatus,
@@ -183,7 +187,7 @@ def on_received_record_save(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=ShareholderWithdrawal)
 def on_shareholder_withdrawal_save(sender, instance, created, **kwargs):
-    """Rule 11: When status becomes approved, deduct amount from user.balance. Once only."""
+    """Rule 11: When status becomes approved, deduct amount from user.balance; record SHARE_WITHDRAWAL and TRANSACTION_FEE. Once only."""
     if instance.status != WithdrawalStatus.APPROVED:
         return
     prev = _withdrawal_previous_status.pop(instance.pk, None)
@@ -192,10 +196,37 @@ def on_shareholder_withdrawal_save(sender, instance, created, **kwargs):
     amount = instance.amount
     if amount <= 0:
         return
-    User.objects.filter(pk=instance.user_id).update(
-        balance=F("balance") - amount
-    )
-    User.objects.filter(pk=instance.user_id, balance__lt=0).update(balance=0)
+    with transaction.atomic():
+        User.objects.filter(pk=instance.user_id).update(
+            balance=F("balance") - amount
+        )
+        User.objects.filter(pk=instance.user_id, balance__lt=0).update(balance=0)
+        # Record share withdrawal for reports
+        Transaction.objects.create(
+            restaurant=None,
+            amount=amount,
+            transaction_type=TransactionType.OUT,
+            category=TransactionCategory.SHARE_WITHDRAWAL,
+            is_system=True,
+            remarks=f'Share withdrawal #{instance.id}',
+        )
+        # Apply per_transaction_fee from system settings: record fee as system revenue and credit SuperSetting
+        ss = services.get_super_setting()
+        fee = (ss.per_transaction_fee or Decimal('0')).quantize(Decimal('0.01'))
+        if fee > 0:
+            fee_amt = min(amount, fee)
+            if fee_amt > 0:
+                Transaction.objects.create(
+                    restaurant=None,
+                    amount=fee_amt,
+                    transaction_type=TransactionType.IN,
+                    category=TransactionCategory.TRANSACTION_FEE,
+                    is_system=True,
+                    remarks=f'Transaction fee from share withdrawal #{instance.id}',
+                )
+                SuperSetting.objects.filter(pk=ss.pk).update(
+                    balance=F("balance") + fee_amt
+                )
 
 
 def _recompute_order_total(order_id):
