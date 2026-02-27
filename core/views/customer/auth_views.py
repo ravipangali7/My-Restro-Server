@@ -13,6 +13,7 @@ from django.core.cache import cache
 
 from core.models import Customer, CustomerToken, User
 from core.utils import customer_auth_required
+from core.constants import ALLOWED_COUNTRY_CODES
 
 
 def _normalize_phone(phone):
@@ -68,8 +69,8 @@ def _validate_password(password):
 @require_http_methods(['POST'])
 def customer_register(request):
     """
-    POST JSON: name, phone, address, password, fcm_token (optional).
-    If phone already exists: 400 "Phone already registered. Please login."
+    POST JSON: name, phone, country_code (required), address, password, fcm_token (optional).
+    If (country_code, phone) already exists: 400 "Phone already registered. Please login."
     """
     try:
         body = json.loads(request.body) if request.body else {}
@@ -84,21 +85,26 @@ def customer_register(request):
     fcm_token = (body.get('fcm_token') or '').strip()
     if not name:
         return JsonResponse({'error': 'name required'}, status=400)
+    if not country_code:
+        return JsonResponse({'error': 'Country code is required.'}, status=400)
+    if country_code not in ALLOWED_COUNTRY_CODES:
+        return JsonResponse({
+            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+        }, status=400)
     if not phone:
         return JsonResponse({'error': 'phone required'}, status=400)
     err = _validate_password(password)
     if err:
         return JsonResponse({'error': err}, status=400)
-    # Reject if any variant of this phone is already registered
-    if any(Customer.objects.filter(phone=v).exists() for v in _phone_lookup_variants(raw_phone)):
+    if Customer.objects.filter(country_code=country_code, phone=phone).exists():
         return JsonResponse(
             {'error': 'Phone already registered. Please login.'},
             status=400
         )
     user = None
-    if not User.objects.filter(phone=phone).exists():
+    if not User.objects.filter(country_code=country_code, phone=phone).exists():
         user = User.objects.create(
-            username=phone,
+            username=f'{country_code}_{phone}',  # unique for AbstractUser
             phone=phone,
             name=name,
             country_code=country_code,
@@ -238,27 +244,35 @@ RATE_TTL = 60   # 1 min between requests per phone
 @require_http_methods(['POST'])
 def customer_request_reset(request):
     """
-    POST JSON: phone. Generate 6-digit OTP, store in cache, send (stub).
-    Rate-limit: one request per phone per minute.
+    POST JSON: phone, country_code (required). Generate 6-digit OTP, store in cache, send (stub).
+    Rate-limit: one request per (country_code, phone) per minute.
     """
     try:
         body = json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
-    phone = _normalize_phone(body.get('phone'))
+    raw_phone = _normalize_phone(body.get('phone'))
+    phone = _phone_for_storage(raw_phone) if raw_phone else ''
+    country_code = (body.get('country_code') or '').strip()
     if not phone:
         return JsonResponse({'error': 'phone required'}, status=400)
-    rate_key = OTP_RATE_PREFIX + phone
+    if not country_code:
+        return JsonResponse({'error': 'Country code is required.'}, status=400)
+    if country_code not in ALLOWED_COUNTRY_CODES:
+        return JsonResponse({
+            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+        }, status=400)
+    rate_key = OTP_RATE_PREFIX + country_code + '_' + phone
     if cache.get(rate_key):
         return JsonResponse(
             {'error': 'Please wait a minute before requesting another OTP'},
             status=429
         )
-    customer = Customer.objects.filter(phone=phone).first()
+    customer = Customer.objects.filter(country_code=country_code, phone=phone).first()
     if not customer:
-        return JsonResponse({'error': 'No account found for this phone'}, status=404)
+        return JsonResponse({'error': 'Invalid country code or phone number.'}, status=404)
     otp = ''.join(secrets.choice('0123456789') for _ in range(6))
-    cache_key = OTP_CACHE_PREFIX + phone
+    cache_key = OTP_CACHE_PREFIX + country_code + '_' + phone
     cache.set(cache_key, otp, timeout=OTP_TTL)
     cache.set(rate_key, '1', timeout=RATE_TTL)
     # TODO: send OTP via SMS when provider is configured
@@ -269,16 +283,24 @@ def customer_request_reset(request):
 @csrf_exempt
 @require_http_methods(['POST'])
 def customer_confirm_reset(request):
-    """POST JSON: phone, otp, new_password. Verify OTP and set password."""
+    """POST JSON: phone, country_code (required), otp, new_password. Verify OTP and set password."""
     try:
         body = json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
-    phone = _normalize_phone(body.get('phone'))
+    raw_phone = _normalize_phone(body.get('phone'))
+    phone = _phone_for_storage(raw_phone) if raw_phone else ''
+    country_code = (body.get('country_code') or '').strip()
     otp = (body.get('otp') or '').strip()
     new_password = body.get('new_password', '')
     if not phone:
         return JsonResponse({'error': 'phone required'}, status=400)
+    if not country_code:
+        return JsonResponse({'error': 'Country code is required.'}, status=400)
+    if country_code not in ALLOWED_COUNTRY_CODES:
+        return JsonResponse({
+            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+        }, status=400)
     if not otp:
         return JsonResponse({'error': 'otp required'}, status=400)
     if not new_password:
@@ -286,13 +308,13 @@ def customer_confirm_reset(request):
     err = _validate_password(new_password)
     if err:
         return JsonResponse({'error': err}, status=400)
-    cache_key = OTP_CACHE_PREFIX + phone
+    cache_key = OTP_CACHE_PREFIX + country_code + '_' + phone
     stored = cache.get(cache_key)
     if not stored or stored != otp:
         return JsonResponse({'error': 'Invalid or expired OTP'}, status=400)
-    customer = Customer.objects.filter(phone=phone).first()
+    customer = Customer.objects.filter(country_code=country_code, phone=phone).first()
     if not customer:
-        return JsonResponse({'error': 'Account not found'}, status=404)
+        return JsonResponse({'error': 'Invalid country code or phone number.'}, status=404)
     customer.password = make_password(new_password)
     customer.save(update_fields=['password', 'updated_at'])
     cache.delete(cache_key)

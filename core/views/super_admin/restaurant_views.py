@@ -13,7 +13,7 @@ from core.models import (
     PaidRecord, ReceivedRecord, Purchase, Expenses, StockLog, Attendance,
     TransactionCategory, SuperSetting, PaymentStatus,
 )
-from core.utils import auth_required
+from core.utils import auth_required, image_url_for_request
 from core.constants import ALLOWED_COUNTRY_CODES
 
 
@@ -32,7 +32,7 @@ def _parse_decimal(value, default=None):
         return default
 
 
-def _restaurant_to_dict(r, stats_extra=None):
+def _restaurant_to_dict(r, stats_extra=None, request=None):
     d = {
         'id': r.id,
         'user_id': r.user_id,
@@ -40,7 +40,7 @@ def _restaurant_to_dict(r, stats_extra=None):
         'name': r.name,
         'phone': r.phone or '',
         'country_code': getattr(r, 'country_code', '') or '',
-        'logo': r.logo.url if r.logo else None,
+        'logo': image_url_for_request(request, r.logo if getattr(r, 'logo', None) else None),
         'address': r.address or '',
         'balance': str(r.balance),
         'due_balance': str(r.due_balance),
@@ -171,14 +171,14 @@ def super_admin_restaurant_list(request):
             'revenue': str(rev),
             'order_count': order_count,
             'staff_count': staff_count,
-        }))
+        }, request=request))
     return JsonResponse({'stats': stats, 'results': results})
 
 
 @require_http_methods(['GET'])
 def super_admin_restaurant_detail(request, pk):
     r = get_object_or_404(Restaurant, pk=pk)
-    data = _restaurant_to_dict(r)
+    data = _restaurant_to_dict(r, request=request)
     # Vendor financials for this restaurant
     vendor_agg = Vendor.objects.filter(restaurant=r).aggregate(
         to_pay=Sum('to_pay'), to_receive=Sum('to_receive')
@@ -222,7 +222,7 @@ def super_admin_restaurant_detail(request, pk):
         'name': getattr(owner_user, 'name', '') or getattr(owner_user, 'username', ''),
         'phone': getattr(owner_user, 'phone', '') or '',
         'country_code': getattr(owner_user, 'country_code', '') or '',
-        'image': owner_user.image.url if getattr(owner_user, 'image', None) and owner_user.image else None,
+        'image': image_url_for_request(request, getattr(owner_user, 'image', None)),
     } if owner_user else None
     # Staff list (managers, waiters)
     staff_list = Staff.objects.filter(restaurant=r).select_related('user')
@@ -425,7 +425,7 @@ def super_admin_restaurant_create(request):
     if logo_file:
         r.logo = logo_file
     r.save()
-    return JsonResponse(_restaurant_to_dict(r), status=201)
+    return JsonResponse(_restaurant_to_dict(r, request=request), status=201)
 
 
 @csrf_exempt
@@ -458,7 +458,7 @@ def super_admin_restaurant_update(request, pk):
     if 'subscription_end' in body:
         r.subscription_end = body['subscription_end'] or None
     r.save()
-    return JsonResponse(_restaurant_to_dict(r))
+    return JsonResponse(_restaurant_to_dict(r, request=request))
 
 
 @auth_required

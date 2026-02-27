@@ -9,7 +9,8 @@ from django.contrib.auth import get_user_model
 
 from django.db.models import Sum, Q
 from core.models import SuperSetting, ShareholderWithdrawal, Transaction, TransactionCategory, WithdrawalStatus
-from core.utils import auth_required
+from core.utils import auth_required, image_url_for_request
+from core.constants import ALLOWED_COUNTRY_CODES
 
 User = get_user_model()
 
@@ -33,13 +34,13 @@ def _get_request_body(request):
     return body, None
 
 
-def _shareholder_to_dict(u, include_extra=False):
+def _shareholder_to_dict(u, include_extra=False, request=None):
     d = {
         'id': u.id,
         'name': getattr(u, 'name', '') or getattr(u, 'username', ''),
         'phone': getattr(u, 'phone', ''),
         'country_code': getattr(u, 'country_code', '') or '',
-        'image': u.image.url if getattr(u, 'image', None) and u.image else None,
+        'image': image_url_for_request(request, getattr(u, 'image', None)),
         'is_shareholder': getattr(u, 'is_shareholder', False),
         'share_percentage': str(getattr(u, 'share_percentage', 0) or 0),
         'balance': str(getattr(u, 'balance', 0) or 0),
@@ -55,7 +56,7 @@ def _shareholder_to_dict(u, include_extra=False):
 @require_http_methods(['GET'])
 def super_admin_shareholder_detail(request, pk):
     u = get_object_or_404(User, pk=pk)
-    data = _shareholder_to_dict(u, include_extra=True)
+    data = _shareholder_to_dict(u, include_extra=True, request=request)
     # Withdrawals for this shareholder
     withdrawals_qs = ShareholderWithdrawal.objects.filter(user=u).order_by('-created_at')
     data['withdrawals'] = [
@@ -143,7 +144,7 @@ def super_admin_shareholder_list(request):
         'system_balance': system_balance,
         'shareholder_balance': str(shareholder_balance),
     }
-    results = [_shareholder_to_dict(u) for u in qs]
+    results = [_shareholder_to_dict(u, request=request) for u in qs]
     return JsonResponse({'stats': stats, 'results': results})
 
 
@@ -153,20 +154,29 @@ def super_admin_shareholder_list(request):
 def super_admin_shareholder_create(request):
     body, image_file = _get_request_body(request)
     phone = (body.get('phone') or '').strip()
+    country_code = (body.get('country_code') or '').strip()
     name = (body.get('name') or '').strip()
     if not phone:
         return JsonResponse({'error': 'phone required'}, status=400)
-    user, _ = User.objects.get_or_create(phone=phone, defaults={'username': phone, 'name': name})
+    if not country_code:
+        return JsonResponse({'error': 'Country code is required.'}, status=400)
+    if country_code not in ALLOWED_COUNTRY_CODES:
+        return JsonResponse({
+            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+        }, status=400)
+    username = f'{country_code}_{phone}'
+    user, _ = User.objects.get_or_create(
+        country_code=country_code,
+        phone=phone,
+        defaults={'username': username, 'name': name or username},
+    )
     user.is_shareholder = True
     user.share_percentage = Decimal(str(body.get('share_percentage', 0)))
     user.name = name or user.name
-    country_code = (body.get('country_code') or '').strip()
-    if country_code:
-        user.country_code = country_code
     if image_file:
         user.image = image_file
     user.save()
-    return JsonResponse(_shareholder_to_dict(user), status=201)
+    return JsonResponse(_shareholder_to_dict(user, request=request), status=201)
 
 
 @csrf_exempt
@@ -180,12 +190,28 @@ def super_admin_shareholder_update(request, pk):
     if 'name' in body:
         u.name = str(body['name']).strip()
     if 'phone' in body:
-        u.phone = str(body['phone']).strip()
+        new_phone = str(body['phone']).strip()
+        new_cc = str(body.get('country_code') or u.country_code or '').strip()
+        if new_phone:
+            if not new_cc:
+                return JsonResponse({'error': 'Country code is required.'}, status=400)
+            if new_cc not in ALLOWED_COUNTRY_CODES:
+                return JsonResponse({
+                    'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+                }, status=400)
+            if User.objects.filter(country_code=new_cc, phone=new_phone).exclude(pk=u.pk).exists():
+                return JsonResponse({'error': 'Another user with this country code and phone already exists'}, status=400)
+        u.phone = new_phone
+    if 'country_code' in body:
+        new_cc = str(body.get('country_code', '')).strip()
+        if new_cc and new_cc not in ALLOWED_COUNTRY_CODES:
+            return JsonResponse({
+                'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+            }, status=400)
+        u.country_code = new_cc
     if 'share_percentage' in body:
         u.share_percentage = Decimal(str(body['share_percentage']))
-    if 'country_code' in body:
-        u.country_code = str(body.get('country_code', '')).strip()
     if 'is_shareholder' in body:
         u.is_shareholder = str(body.get('is_shareholder')).lower() in ('true', '1', 'yes')
     u.save()
-    return JsonResponse(_shareholder_to_dict(u))
+    return JsonResponse(_shareholder_to_dict(u, request=request))

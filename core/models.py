@@ -119,8 +119,8 @@ class RiderSource(models.TextChoices):
 class User(AbstractUser):
     """Custom user; id and password from AbstractUser."""
     name = models.CharField(max_length=255, blank=True)
-    phone = models.CharField(max_length=20, blank=True, unique=True)
-    country_code = models.CharField(max_length=10, blank=True)
+    phone = models.CharField(max_length=20)
+    country_code = models.CharField(max_length=10)
     image = models.ImageField(upload_to='users/', blank=True, null=True)
     is_owner = models.BooleanField(default=False)
     is_restaurant_staff = models.BooleanField(default=False)
@@ -144,10 +144,16 @@ class User(AbstractUser):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
-    USERNAME_FIELD = 'phone'
+    USERNAME_FIELD = 'id'  # Login uses (country_code, phone) via custom auth
 
     class Meta:
         db_table = 'core_user'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['country_code', 'phone'],
+                name='unique_user_country_phone',
+            ),
+        ]
 
     def save(self, *args, **kwargs):
         if not self.name and (self.first_name or self.last_name):
@@ -164,8 +170,8 @@ class Customer(models.Model):
         related_name='customer_profile',
     )
     name = models.CharField(max_length=255)
-    phone = models.CharField(max_length=20, unique=True)
-    country_code = models.CharField(max_length=10, blank=True)
+    phone = models.CharField(max_length=20)
+    country_code = models.CharField(max_length=10)
     address = models.TextField(blank=True)
     password = models.CharField(max_length=128, default='!')  # hashed; '!' = unusable for existing rows
     fcm_token = models.CharField(max_length=255, blank=True)
@@ -175,6 +181,12 @@ class Customer(models.Model):
     class Meta:
         db_table = 'core_customer'
         ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['country_code', 'phone'],
+                name='unique_customer_country_phone',
+            ),
+        ]
 
     def __str__(self):
         return f'{self.name} ({self.phone})'

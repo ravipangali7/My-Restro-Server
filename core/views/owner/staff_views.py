@@ -12,8 +12,9 @@ from django.db import IntegrityError
 
 from django.db.models import Count, Sum, Avg
 from core.models import Staff, Restaurant, Table, Order, Feedback, PaidRecord
-from core.utils import get_restaurant_ids, auth_required
+from core.utils import get_restaurant_ids, auth_required, image_url_for_request
 from core.permissions import is_manager
+from core.constants import ALLOWED_COUNTRY_CODES
 
 User = get_user_model()
 
@@ -31,7 +32,7 @@ def _decimal_or_none(val):
         return None
 
 
-def _staff_to_dict(s):
+def _staff_to_dict(s, request=None):
     name = getattr(s.user, 'name', None) or (getattr(s.user, 'username', '')) or ''
     joined_at = s.joined_at
     if joined_at is None:
@@ -41,9 +42,7 @@ def _staff_to_dict(s):
     else:
         joined_at_str = str(joined_at)[:10] if joined_at else None
     assigned_table_ids = list(s.assigned_tables.values_list('id', flat=True))
-    user_image = None
-    if getattr(s.user, 'image', None) and s.user.image:
-        user_image = s.user.image.url
+    user_image = image_url_for_request(request, getattr(s.user, 'image', None))
     return {
         'id': s.id,
         'restaurant_id': s.restaurant_id,
@@ -79,11 +78,9 @@ def _staff_qs(request):
     return qs.select_related('user').prefetch_related('assigned_tables')
 
 
-def _user_to_dict(u):
+def _user_to_dict(u, request=None):
     """Return minimal user payload for check/create responses."""
-    image_url = None
-    if getattr(u, 'image', None) and u.image:
-        image_url = u.image.url
+    image_url = image_url_for_request(request, getattr(u, 'image', None))
     return {
         'id': u.id,
         'name': getattr(u, 'name', None) or getattr(u, 'username', '') or str(u.id),
@@ -106,7 +103,7 @@ def owner_user_check(request):
         user = User.objects.filter(phone=id_or_phone, is_active=True).first()
     if user is None:
         return JsonResponse({'error': 'User not found'}, status=404)
-    return JsonResponse(_user_to_dict(user))
+    return JsonResponse(_user_to_dict(user, request))
 
 
 @auth_required
@@ -114,7 +111,7 @@ def owner_user_check(request):
 def owner_available_users(request):
     """List users available for staff assignment (id, name, phone)."""
     qs = User.objects.filter(is_active=True).order_by('name')
-    results = [_user_to_dict(u) for u in qs]
+    results = [_user_to_dict(u, request) for u in qs]
     return JsonResponse({'results': results})
 
 
@@ -148,7 +145,7 @@ def owner_user_update(request, user_id):
     if image_file:
         target.image = image_file
         target.save(update_fields=['image'])
-    return JsonResponse(_user_to_dict(target))
+    return JsonResponse(_user_to_dict(target, request))
 
 
 def _parse_user_create_request(request):
@@ -174,27 +171,35 @@ def _parse_user_create_request(request):
 @auth_required
 @require_http_methods(['POST'])
 def owner_user_create(request):
-    """Create a non-owner user for staff assignment. Accepts phone, password, name (optional), image (optional multipart)."""
+    """Create a non-owner user for staff assignment. Accepts phone, country_code (required), password, name (optional), image (optional multipart)."""
     body, image_file = _parse_user_create_request(request)
     phone = (body.get('phone') or '').strip()
+    country_code = (body.get('country_code') or '').strip()
     password = body.get('password', '')
     if not phone:
         return JsonResponse({'error': 'phone required'}, status=400)
+    if not country_code:
+        return JsonResponse({'error': 'Country code is required.'}, status=400)
+    if country_code not in ALLOWED_COUNTRY_CODES:
+        return JsonResponse({
+            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+        }, status=400)
     if not password:
         return JsonResponse({'error': 'password required'}, status=400)
-    if User.objects.filter(phone=phone).exists():
-        return JsonResponse({'error': 'User with this phone already exists'}, status=400)
+    if User.objects.filter(country_code=country_code, phone=phone).exists():
+        return JsonResponse({'error': 'User with this country code and phone already exists'}, status=400)
     try:
         validate_password(password)
     except ValidationError as e:
         msg = (list(e.messages)[0] if e.messages else None) or 'Invalid password'
         return JsonResponse({'error': msg}, status=400)
     name = (body.get('name') or '').strip()
-    username = phone
+    username = f'{country_code}_{phone}'
     if User.objects.filter(username=username).exists():
-        username = f"staff_{phone}_{User.objects.count()}"
+        username = f"staff_{country_code}_{phone}_{User.objects.count()}"
     user = User.objects.create_user(username=username, password=password, email=username)
     user.phone = phone
+    user.country_code = country_code
     user.name = name or username
     user.is_owner = False
     user.is_restaurant_staff = True
@@ -202,7 +207,7 @@ def owner_user_create(request):
     if image_file:
         user.image = image_file
     user.save()
-    return JsonResponse(_user_to_dict(user), status=201)
+    return JsonResponse(_user_to_dict(user, request), status=201)
 
 
 @auth_required
@@ -238,7 +243,7 @@ def owner_staff_list(request):
         )
     results = []
     for s in staff_list:
-        d = _staff_to_dict(s)
+        d = _staff_to_dict(s, request)
         d['orders_handled'] = orders_handled_map.get(s.id, 0)
         avg_rating = feedback_avg_map.get(s.id)
         d['feedback_rating_avg'] = round(float(avg_rating), 1) if avg_rating is not None else None
@@ -338,7 +343,7 @@ def owner_staff_create(request):
                     continue
             table_objs = list(Table.objects.filter(pk__in=table_ids, restaurant_id=s.restaurant_id))
             s.assigned_tables.set(table_objs)
-    return JsonResponse(_staff_to_dict(s), status=201)
+    return JsonResponse(_staff_to_dict(s, request), status=201)
 
 
 @csrf_exempt
@@ -409,7 +414,7 @@ def owner_staff_update(request, pk):
             status=400,
         )
     s.save()
-    return JsonResponse(_staff_to_dict(s))
+    return JsonResponse(_staff_to_dict(s, request))
 
 
 @csrf_exempt

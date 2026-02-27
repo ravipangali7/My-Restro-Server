@@ -28,7 +28,7 @@ from core.views.owner.leaderboard_views import owner_leaderboard
 from core.views.owner.customer_views import owner_customer_list, owner_customer_detail
 from core.views.owner.order_views import owner_customer_order_list
 from core.views.owner.feedback_views import owner_feedback_list
-from core.views.owner.expense_views import owner_expense_list, owner_expense_detail, owner_expense_create, owner_expense_update, owner_expense_delete
+from core.views.owner.expense_views import owner_expense_list, owner_expense_detail, owner_expense_create, owner_expense_update, owner_expense_upload_image, owner_expense_delete
 from core.views.owner.paid_received_views import owner_paid_list, owner_received_list, owner_paid_create, owner_received_create
 from core.views.owner.pl_views import owner_pl
 from core.views.owner.analytics_views import owner_analytics
@@ -123,6 +123,7 @@ urlpatterns = [
     path('expenses/create/', _manager_view(owner_expense_create)),
     path('expenses/<int:pk>/', _manager_view(owner_expense_detail)),
     path('expenses/<int:pk>/update/', _manager_view(owner_expense_update)),
+    path('expenses/<int:pk>/upload-image/', _manager_view(owner_expense_upload_image)),
     path('expenses/<int:pk>/delete/', _manager_view(owner_expense_delete)),
     path('paid/', _manager_view(owner_paid_list)),
     path('paid/create/', _manager_view(owner_paid_create)),

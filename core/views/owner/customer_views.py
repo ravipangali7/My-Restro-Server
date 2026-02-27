@@ -71,12 +71,24 @@ def owner_customer_create(request):
         body = json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    from core.constants import ALLOWED_COUNTRY_CODES
+    from core.views.customer.auth_views import _phone_for_storage, _normalize_phone
     name = (body.get('name') or '').strip()
     if not name:
         return JsonResponse({'error': 'name required'}, status=400)
-    phone = (body.get('phone') or '').strip()
+    raw_phone = _normalize_phone(body.get('phone'))
+    phone = _phone_for_storage(raw_phone) if raw_phone else ''
+    country_code = (body.get('country_code') or '').strip()
     if not phone:
         return JsonResponse({'error': 'phone required'}, status=400)
+    if not country_code:
+        return JsonResponse({'error': 'Country code is required.'}, status=400)
+    if country_code not in ALLOWED_COUNTRY_CODES:
+        return JsonResponse({
+            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+        }, status=400)
+    if Customer.objects.filter(country_code=country_code, phone=phone).exists():
+        return JsonResponse({'error': 'Customer with this country code and phone already exists'}, status=400)
     rid = get_restaurant_ids(request)
     if getattr(request.user, 'is_superuser', False):
         restaurant_ids = list(Restaurant.objects.values_list('id', flat=True))
@@ -87,7 +99,7 @@ def owner_customer_create(request):
     customer = Customer.objects.create(
         name=name,
         phone=phone,
-        country_code=(body.get('country_code') or '')[:10],
+        country_code=country_code[:10],
         address=(body.get('address') or '')[:2000],
     )
     for rest_id in restaurant_ids:

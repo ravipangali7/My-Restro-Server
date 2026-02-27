@@ -6,6 +6,24 @@ from decimal import Decimal
 from datetime import date, datetime
 
 
+def image_url_for_request(request, field):
+    """
+    Return full image URL for API response when request is available, else relative .url or None.
+    Use in list/detail views so frontend receives a usable URL (avoids BASE_URL/MEDIA_URL mismatch).
+    """
+    if field is None or not getattr(field, 'url', None):
+        return None
+    if not field:
+        return None
+    try:
+        url = field.url
+    except (ValueError, AttributeError):
+        return None
+    if request and url:
+        return request.build_absolute_uri(url)
+    return url
+
+
 def _serialize_value(v):
     if v is None:
         return None

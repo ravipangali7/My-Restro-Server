@@ -10,7 +10,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.hashers import check_password
 from rest_framework.authtoken.models import Token
 from core.models import User, Customer, CustomerToken
-from core.utils import get_restaurant_ids, get_role, auth_required
+from core.utils import get_restaurant_ids, get_role, auth_required, image_url_for_request
 from core.constants import ALLOWED_COUNTRY_CODES
 from core.views.customer.auth_views import _phone_lookup_variants, _customer_to_dict
 
@@ -50,11 +50,14 @@ def _user_to_dict(user):
     }
 
 
+LOGIN_ERROR_MSG = 'Invalid country code or phone number.'
+
+
 @csrf_exempt
 @require_http_methods(['POST'])
 def login(request):
     """
-    Unified login: POST JSON { "phone", "password", optional "country_code", optional "account_type" }.
+    Unified login: POST JSON { "phone", "password", "country_code" (required), optional "account_type" }.
     account_type: "customer" = try only Customer; "staff" or "user" = try only User; else try Customer first then User.
     Returns { "token", "user" } or { "token", "customer" } or 401.
     """
@@ -68,7 +71,9 @@ def login(request):
     account_type = (body.get('account_type') or '').strip().lower()
     if not raw_phone:
         return JsonResponse({'error': 'phone required'}, status=400)
-    if country_code and country_code not in ALLOWED_COUNTRY_CODES:
+    if not country_code:
+        return JsonResponse({'error': 'Country code is required.'}, status=400)
+    if country_code not in ALLOWED_COUNTRY_CODES:
         return JsonResponse({
             'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
         }, status=400)
@@ -78,13 +83,14 @@ def login(request):
     try_customer_only = (account_type == 'customer')
     try_staff_only = (account_type in ('staff', 'user'))
 
-    # 1) Try Customer (when account_type is customer, or when no hint and we try both)
+    # 1) Try Customer: match by (country_code, phone) exactly
     if not try_staff_only:
-        customer = None
-        for variant in _phone_lookup_variants(raw_phone):
-            customer = Customer.objects.filter(phone=variant).first()
-            if customer:
-                break
+        from core.views.customer.auth_views import _phone_for_storage
+        phone_for_lookup = _phone_for_storage(raw_phone) if raw_phone else ''
+        customer = Customer.objects.filter(
+            country_code=country_code,
+            phone=phone_for_lookup,
+        ).first()
         if customer and customer.password and customer.password != '!' and check_password(password, customer.password):
             token, _ = CustomerToken.objects.get_or_create(
                 customer=customer,
@@ -98,16 +104,11 @@ def login(request):
                 'customer': _customer_to_dict(customer),
             })
         if try_customer_only:
-            return JsonResponse({'error': 'Invalid phone or password'}, status=401)
+            return JsonResponse({'error': LOGIN_ERROR_MSG}, status=401)
 
-    # 2) Try User (staff: super_admin, owner, manager, waiter)
+    # 2) Try User (staff): match by (country_code, phone) exactly; no fallback
     if not try_customer_only:
-        qs = User.objects.filter(phone=raw_phone)
-        if country_code:
-            qs = qs.filter(country_code=country_code)
-        user = qs.first()
-        if not user and country_code:
-            user = User.objects.filter(phone=raw_phone).first()
+        user = User.objects.filter(phone=raw_phone, country_code=country_code).first()
         if user and user.check_password(password):
             if not user.is_active:
                 return JsonResponse({'error': 'Account disabled'}, status=403)
@@ -117,9 +118,9 @@ def login(request):
                 'user': _user_to_dict(user),
             })
         if try_staff_only:
-            return JsonResponse({'error': 'Invalid phone or password'}, status=401)
+            return JsonResponse({'error': LOGIN_ERROR_MSG}, status=401)
 
-    return JsonResponse({'error': 'Invalid phone or password'}, status=401)
+    return JsonResponse({'error': LOGIN_ERROR_MSG}, status=401)
 
 
 @csrf_exempt
@@ -134,14 +135,14 @@ def logout(request):
     return JsonResponse({'success': True})
 
 
-def _staff_profile_to_dict(user):
+def _staff_profile_to_dict(user, request=None):
     """Profile fields for GET/PATCH auth/profile (staff only). Includes kyc_status and share_percentage for owner."""
     out = {
         'id': user.id,
         'name': getattr(user, 'name', '') or getattr(user, 'username', '') or '',
         'country_code': getattr(user, 'country_code', '') or '',
         'phone': getattr(user, 'phone', '') or '',
-        'image': user.image.url if getattr(user, 'image', None) and user.image else None,
+        'image': image_url_for_request(request, getattr(user, 'image', None)),
     }
     if getattr(user, 'is_owner', False):
         out['kyc_status'] = getattr(user, 'kyc_status', 'pending')
@@ -175,7 +176,7 @@ def staff_profile_get(request):
     """GET /api/auth/profile/ - current staff user profile (name, country_code, phone, image)."""
     user = request.user
     # Staff only (User with token); customer uses customer profile
-    return JsonResponse(_staff_profile_to_dict(user))
+    return JsonResponse(_staff_profile_to_dict(user, request))
 
 
 @csrf_exempt
@@ -191,8 +192,10 @@ def staff_profile_patch(request):
         user.name = str(body['name']).strip()
     if 'phone' in body:
         new_phone = str(body['phone']).strip()
-        if new_phone and User.objects.filter(phone=new_phone).exclude(pk=user.pk).exists():
-            return JsonResponse({'error': 'Another user with this phone already exists'}, status=400)
+        if new_phone:
+            new_cc = str(body.get('country_code') or user.country_code or '').strip()
+            if User.objects.filter(country_code=new_cc, phone=new_phone).exclude(pk=user.pk).exists():
+                return JsonResponse({'error': 'Another user with this country code and phone already exists'}, status=400)
         user.phone = new_phone
     if 'country_code' in body:
         new_cc = str(body['country_code']).strip()
@@ -202,7 +205,7 @@ def staff_profile_patch(request):
             }, status=400)
         user.country_code = new_cc
     user.save()
-    return JsonResponse(_staff_profile_to_dict(user))
+    return JsonResponse(_staff_profile_to_dict(user, request))
 
 
 @csrf_exempt

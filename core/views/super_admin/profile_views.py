@@ -118,8 +118,16 @@ def super_admin_profile_update(request, pk):
         u.name = str(body['name']).strip()
     if 'phone' in body:
         new_phone = str(body['phone']).strip()
-        if new_phone and User.objects.filter(phone=new_phone).exclude(pk=u.pk).exists():
-            return JsonResponse({'error': 'Another user with this phone already exists'}, status=400)
+        new_cc = str(body.get('country_code') or u.country_code or '').strip()
+        if new_phone:
+            if not new_cc:
+                return JsonResponse({'error': 'Country code is required.'}, status=400)
+            if new_cc not in ALLOWED_COUNTRY_CODES:
+                return JsonResponse({
+                    'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+                }, status=400)
+            if User.objects.filter(country_code=new_cc, phone=new_phone).exclude(pk=u.pk).exists():
+                return JsonResponse({'error': 'Another user with this country code and phone already exists'}, status=400)
         u.phone = new_phone
     if 'country_code' in body:
         new_cc = str(body['country_code']).strip()

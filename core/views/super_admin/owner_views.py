@@ -8,7 +8,7 @@ from decimal import Decimal
 from django.db.models import Q, Count, Sum
 
 from core.models import User, Restaurant, Order, OrderStatus
-from core.utils import auth_required
+from core.utils import auth_required, image_url_for_request
 from core.constants import ALLOWED_COUNTRY_CODES
 
 
@@ -39,7 +39,7 @@ def _get_request_body(request):
     return body, None
 
 
-def _owner_to_dict(u):
+def _owner_to_dict(u, request=None):
     return {
         'id': u.id,
         'name': getattr(u, 'name', '') or getattr(u, 'username', ''),
@@ -51,8 +51,8 @@ def _owner_to_dict(u):
         'is_active': getattr(u, 'is_active', True),
         'kyc_status': getattr(u, 'kyc_status', 'pending'),
         'reject_reason': getattr(u, 'reject_reason', '') or '',
-        'kyc_document': u.kyc_document.url if getattr(u, 'kyc_document', None) and u.kyc_document else None,
-        'image': u.image.url if getattr(u, 'image', None) and u.image else None,
+        'kyc_document': image_url_for_request(request, getattr(u, 'kyc_document', None)),
+        'image': image_url_for_request(request, getattr(u, 'image', None)),
         'created_at': u.created_at.isoformat() if getattr(u, 'created_at', None) else None,
         'restaurant_count': u.restaurants.count() if hasattr(u, 'restaurants') else 0,
     }
@@ -79,7 +79,7 @@ def super_admin_owner_list(request):
     stats = {'total': total, 'pending': pending, 'approved': approved, 'rejected': rejected}
     results = []
     for u in qs[:100]:
-        d = _owner_to_dict(u)
+        d = _owner_to_dict(u, request)
         d['restaurant_count'] = u.restaurant_count
         results.append(d)
     return JsonResponse({'stats': stats, 'results': results})
@@ -92,7 +92,7 @@ def super_admin_owner_detail(request, pk):
     if err:
         return err
     u = get_object_or_404(User, pk=pk, is_owner=True)
-    data = _owner_to_dict(u)
+    data = _owner_to_dict(u, request)
     restaurants_qs = Restaurant.objects.filter(user=u)
     restaurant_count = restaurants_qs.count()
     total_revenue = Decimal('0')
@@ -143,25 +143,27 @@ def super_admin_owner_create(request):
         return err
     body, image_file = _get_request_body(request)
     phone = (body.get('phone') or '').strip()
+    country_code = (body.get('country_code') or '').strip()
     password = body.get('password', '')
     if not phone:
         return JsonResponse({'error': 'phone required'}, status=400)
-    if not password:
-        return JsonResponse({'error': 'password required'}, status=400)
-    if User.objects.filter(phone=phone).exists():
-        return JsonResponse({'error': 'User with this phone already exists'}, status=400)
-    name = (body.get('name') or '').strip()
-    country_code = (body.get('country_code') or '').strip()
-    if country_code and country_code not in ALLOWED_COUNTRY_CODES:
+    if not country_code:
+        return JsonResponse({'error': 'Country code is required.'}, status=400)
+    if country_code not in ALLOWED_COUNTRY_CODES:
         return JsonResponse({
             'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
         }, status=400)
+    if not password:
+        return JsonResponse({'error': 'password required'}, status=400)
+    if User.objects.filter(country_code=country_code, phone=phone).exists():
+        return JsonResponse({'error': 'User with this country code and phone already exists'}, status=400)
+    name = (body.get('name') or '').strip()
     email = (body.get('email') or '').strip()
     first_name = (body.get('first_name') or '').strip()
     last_name = (body.get('last_name') or '').strip()
-    username = phone if not country_code else f"{country_code}{phone}"
+    username = f'{country_code}_{phone}'
     if User.objects.filter(username=username).exists():
-        username = f"owner_{phone}_{User.objects.count()}"
+        username = f"owner_{country_code}_{phone}_{User.objects.count()}"
     user = User.objects.create_user(
         username=username,
         password=password,
@@ -178,7 +180,7 @@ def super_admin_owner_create(request):
     if image_file:
         user.image = image_file
     user.save()
-    return JsonResponse(_owner_to_dict(user), status=201)
+    return JsonResponse(_owner_to_dict(user, request), status=201)
 
 
 @csrf_exempt
@@ -195,7 +197,18 @@ def super_admin_owner_update(request, pk):
     if 'name' in body:
         u.name = str(body['name']).strip()
     if 'phone' in body:
-        u.phone = str(body['phone']).strip()
+        new_phone = str(body['phone']).strip()
+        new_cc = str(body.get('country_code') or u.country_code or '').strip()
+        if new_phone:
+            if not new_cc:
+                return JsonResponse({'error': 'Country code is required.'}, status=400)
+            if new_cc not in ALLOWED_COUNTRY_CODES:
+                return JsonResponse({
+                    'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+                }, status=400)
+            if User.objects.filter(country_code=new_cc, phone=new_phone).exclude(pk=u.pk).exists():
+                return JsonResponse({'error': 'Another user with this country code and phone already exists'}, status=400)
+        u.phone = new_phone
     if 'country_code' in body:
         new_cc = str(body['country_code']).strip()
         if new_cc and new_cc not in ALLOWED_COUNTRY_CODES:
@@ -218,7 +231,7 @@ def super_admin_owner_update(request, pk):
     if body.get('password'):
         u.set_password(body['password'])
     u.save()
-    return JsonResponse(_owner_to_dict(u))
+    return JsonResponse(_owner_to_dict(u, request))
 
 
 @csrf_exempt
