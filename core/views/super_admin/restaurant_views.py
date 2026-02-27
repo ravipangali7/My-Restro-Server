@@ -11,7 +11,7 @@ from django.db.models.functions import TruncDate, TruncMonth
 from core.models import (
     Restaurant, User, Order, OrderItem, Vendor, Transaction, Staff, OrderStatus,
     PaidRecord, ReceivedRecord, Purchase, Expenses, StockLog, Attendance,
-    TransactionCategory, SuperSetting,
+    TransactionCategory, SuperSetting, PaymentStatus,
 )
 from core.utils import auth_required
 from core.constants import ALLOWED_COUNTRY_CODES
@@ -54,6 +54,70 @@ def _restaurant_to_dict(r, stats_extra=None):
     if stats_extra:
         d.update(stats_extra)
     return d
+
+
+def _order_to_dict(o, include_items=False):
+    """Minimal order dict for list (matches owner order list shape)."""
+    d = {
+        'id': o.id,
+        'customer_id': o.customer_id,
+        'restaurant_id': o.restaurant_id,
+        'restaurant_name': o.restaurant.name if getattr(o, 'restaurant', None) else None,
+        'table_id': o.table_id,
+        'table_name': o.table.name if o.table else None,
+        'table_number': o.table_number or '',
+        'order_type': o.order_type,
+        'status': o.status,
+        'payment_status': o.payment_status or '',
+        'payment_method': o.payment_method or '',
+        'waiter_id': o.waiter_id,
+        'waiter_name': o.waiter.user.name if o.waiter and getattr(o.waiter, 'user', None) else None,
+        'total': str(o.total),
+        'created_at': o.created_at.isoformat() if o.created_at else None,
+        'updated_at': o.updated_at.isoformat() if o.updated_at else None,
+        'customer_name': o.customer.name if o.customer else None,
+        'customer_phone': o.customer.phone if o.customer else None,
+        'items_count': o.items.count(),
+    }
+    if include_items:
+        d['items'] = [
+            {
+                'id': i.id,
+                'product_name': getattr(i.product, 'name', None) or getattr(i.combo_set, 'name', None) or '—',
+                'quantity': str(i.quantity),
+                'total': str(i.total),
+            }
+            for i in o.items.select_related('product', 'combo_set').all()
+        ]
+    return d
+
+
+@auth_required
+@require_http_methods(['GET'])
+def super_admin_restaurant_orders(request, pk):
+    """GET super_admin restaurants/<pk>/orders/ — paginated orders for restaurant. Params: status, date_from, date_to, page, page_size."""
+    r = get_object_or_404(Restaurant, pk=pk)
+    qs = Order.objects.filter(restaurant=r).select_related('table', 'customer', 'waiter__user').prefetch_related('items').order_by('-created_at')
+    date_from = request.GET.get('date_from')
+    date_to = request.GET.get('date_to')
+    if date_from:
+        qs = qs.filter(created_at__date__gte=date_from)
+    if date_to:
+        qs = qs.filter(created_at__date__lte=date_to)
+    status = (request.GET.get('status') or '').strip().lower()
+    if status and status != 'all':
+        if status == 'paid':
+            qs = qs.filter(payment_status__in=[PaymentStatus.PAID, PaymentStatus.SUCCESS])
+        elif status == 'preparing':
+            qs = qs.filter(status=OrderStatus.RUNNING)
+        else:
+            qs = qs.filter(status=status)
+    total_count = qs.count()
+    page = max(1, int(request.GET.get('page', 1)))
+    page_size = max(1, min(100, int(request.GET.get('page_size', 20))))
+    start = (page - 1) * page_size
+    results = [_order_to_dict(o, include_items=True) for o in qs[start : start + page_size]]
+    return JsonResponse({'count': total_count, 'results': results, 'page': page, 'page_size': page_size})
 
 
 @auth_required

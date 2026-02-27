@@ -9,6 +9,7 @@ from core.views.super_admin.restaurant_views import (
     super_admin_restaurant_update,
     super_admin_restaurant_delete,
     super_admin_restaurant_check_slug,
+    super_admin_restaurant_orders,
 )
 from core.views.super_admin.kyc_views import super_admin_kyc_list, super_admin_kyc_approve_reject
 from core.views.super_admin.owner_views import (
@@ -77,6 +78,7 @@ urlpatterns = [
     path('dashboard/', super_admin_required(super_admin_dashboard)),
     path('restaurants/check-slug/', super_admin_required(super_admin_restaurant_check_slug)),
     path('restaurants/', super_admin_required(super_admin_restaurant_list)),
+    path('restaurants/<int:pk>/orders/', super_admin_required(super_admin_restaurant_orders)),
     path('restaurants/<int:pk>/', super_admin_required(super_admin_restaurant_detail)),
     path('restaurants/create/', super_admin_required(super_admin_restaurant_create)),
     path('restaurants/<int:pk>/update/', super_admin_required(super_admin_restaurant_update)),

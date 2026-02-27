@@ -7,7 +7,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 
-from core.models import SuperSetting, ShareholderWithdrawal, Transaction, TransactionCategory
+from django.db.models import Sum, Q
+from core.models import SuperSetting, ShareholderWithdrawal, Transaction, TransactionCategory, WithdrawalStatus
 from core.utils import auth_required
 
 User = get_user_model()
@@ -32,8 +33,8 @@ def _get_request_body(request):
     return body, None
 
 
-def _shareholder_to_dict(u):
-    return {
+def _shareholder_to_dict(u, include_extra=False):
+    d = {
         'id': u.id,
         'name': getattr(u, 'name', '') or getattr(u, 'username', ''),
         'phone': getattr(u, 'phone', ''),
@@ -44,13 +45,17 @@ def _shareholder_to_dict(u):
         'balance': str(getattr(u, 'balance', 0) or 0),
         'due_balance': str(getattr(u, 'due_balance', 0) or 0),
     }
+    if include_extra:
+        d['kyc_status'] = getattr(u, 'kyc_status', '') or 'pending'
+        d['created_at'] = u.created_at.isoformat() if getattr(u, 'created_at', None) and u.created_at else None
+    return d
 
 
 @auth_required
 @require_http_methods(['GET'])
 def super_admin_shareholder_detail(request, pk):
-    u = get_object_or_404(User, pk=pk, is_shareholder=True)
-    data = _shareholder_to_dict(u)
+    u = get_object_or_404(User, pk=pk)
+    data = _shareholder_to_dict(u, include_extra=True)
     # Withdrawals for this shareholder
     withdrawals_qs = ShareholderWithdrawal.objects.filter(user=u).order_by('-created_at')
     data['withdrawals'] = [
@@ -62,6 +67,24 @@ def super_admin_shareholder_detail(request, pk):
         }
         for w in withdrawals_qs
     ]
+    # Financial summary from withdrawals (no duplicate logic; use stored data)
+    agg = ShareholderWithdrawal.objects.filter(user=u).aggregate(
+        total_withdrawn=Sum('amount', filter=Q(status=WithdrawalStatus.APPROVED)),
+        pending_sum=Sum('amount', filter=Q(status=WithdrawalStatus.PENDING)),
+        approved_sum=Sum('amount', filter=Q(status=WithdrawalStatus.APPROVED)),
+        rejected_sum=Sum('amount', filter=Q(status=WithdrawalStatus.REJECT)),
+    )
+    total_withdrawn = agg['total_withdrawn'] or Decimal('0')
+    data['total_withdrawn'] = str(total_withdrawn)
+    data['withdrawal_pending_count'] = ShareholderWithdrawal.objects.filter(user=u, status=WithdrawalStatus.PENDING).count()
+    data['withdrawal_approved_count'] = ShareholderWithdrawal.objects.filter(user=u, status=WithdrawalStatus.APPROVED).count()
+    data['withdrawal_rejected_count'] = ShareholderWithdrawal.objects.filter(user=u, status=WithdrawalStatus.REJECT).count()
+    data['withdrawal_pending_sum'] = str(agg['pending_sum'] or Decimal('0'))
+    data['withdrawal_approved_sum'] = str(agg['approved_sum'] or Decimal('0'))
+    data['withdrawal_rejected_sum'] = str(agg['rejected_sum'] or Decimal('0'))
+    balance = Decimal(str(data['balance']))
+    data['total_share_distributed'] = str(balance + total_withdrawn)
+    data['net_profit_from_shares'] = data['balance']
     # Recent system-wide share distributions (last 20)
     dist_qs = (
         Transaction.objects.filter(is_system=True, category=TransactionCategory.SHARE_DISTRIBUTION)
@@ -74,6 +97,30 @@ def super_admin_shareholder_detail(request, pk):
         }
         for t in dist_qs
     ]
+    # Transaction history: withdrawals as category-filtered list (share_withdrawal)
+    data['transaction_history'] = [
+        {
+            'id': w.id,
+            'category': 'share_withdrawal',
+            'amount': str(-w.amount),
+            'transaction_type': 'out',
+            'status': w.status,
+            'created_at': w.created_at.isoformat() if w.created_at else None,
+        }
+        for w in withdrawals_qs[:100]
+    ]
+    # Balance flow timeline: withdrawal events (date, amount as negative, label)
+    data['balance_flow_timeline'] = [
+        {
+            'date': w.created_at.isoformat() if w.created_at else None,
+            'amount': float(-w.amount),
+            'type': 'withdrawal',
+            'status': w.status,
+        }
+        for w in withdrawals_qs.order_by('created_at')[:100]
+    ]
+    # Share growth: single point (current share %); no historical store
+    data['share_growth'] = [{'date': data.get('created_at'), 'share_percentage': float(data.get('share_percentage', 0) or 0)}]
     return JsonResponse(data)
 
 

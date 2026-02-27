@@ -10,7 +10,7 @@ from django.db.models.functions import TruncDate
 from django.utils import timezone
 from datetime import timedelta
 
-from core.models import QrStandOrder, Restaurant, Transaction, TransactionCategory, SuperSetting
+from core.models import QrStandOrder, Restaurant, Transaction, TransactionCategory, SuperSetting, PaymentStatus
 from core.utils import auth_required
 
 
@@ -55,12 +55,19 @@ def super_admin_qr_order_list(request):
     accepted = qs.filter(status='accepted').count()
     delivered = qs.filter(status='delivered').count()
     revenue = qs.aggregate(s=Sum('total'))['s'] or Decimal('0')
+    total_quantity_sold = qs.aggregate(s=Sum('quantity'))['s'] or 0
+    paid_qs = qs.filter(payment_status__in=[PaymentStatus.PAID, PaymentStatus.SUCCESS])
+    paid_count = paid_qs.count()
+    paid_revenue = paid_qs.aggregate(s=Sum('total'))['s'] or Decimal('0')
     stats = {
         'total_orders': total_orders,
         'pending': pending,
         'accepted': accepted,
         'delivered': delivered,
         'revenue': str(revenue),
+        'total_quantity_sold': int(total_quantity_sold),
+        'paid_count': paid_count,
+        'paid_revenue': str(paid_revenue),
     }
     # Total QR revenue from system transactions (transaction impact)
     qr_system_revenue = (
