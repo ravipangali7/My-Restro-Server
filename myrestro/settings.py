@@ -60,6 +60,10 @@ MIDDLEWARE = [
 ]
 
 
+# Allow larger multipart uploads (e.g. restaurant images). Nginx must also allow the size (client_max_body_size) or you get 413.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 20 * 1024 * 1024   # 20 MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 20 * 1024 * 1024   # 20 MB
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.TokenAuthentication',
