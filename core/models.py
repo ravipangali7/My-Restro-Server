@@ -247,6 +247,8 @@ class Restaurant(models.Model):
     subscription_start = models.DateField(null=True, blank=True)
     subscription_end = models.DateField(null=True, blank=True)
     is_open = models.BooleanField(default=True)
+    # System active/inactive; if False, hidden from public list, QR/menu disabled, new orders blocked
+    is_restaurant = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

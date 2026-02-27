@@ -114,6 +114,8 @@ def super_admin_qr_order_create(request):
     if not restaurant_id:
         return JsonResponse({'error': 'restaurant_id required'}, status=400)
     restaurant = get_object_or_404(Restaurant, pk=restaurant_id)
+    if not getattr(restaurant, 'is_restaurant', True):
+        return JsonResponse({'error': 'Restaurant is inactive'}, status=403)
     quantity = int(body.get('quantity', 1))
     total = Decimal(str(body.get('total', 0)))
     q = QrStandOrder(

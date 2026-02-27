@@ -31,6 +31,13 @@ def _restaurant_to_public_dict(r):
     }
 
 
+def _check_restaurant_active(r):
+    """Return None if restaurant is active (is_restaurant=True), else JsonResponse 404 with inactive message."""
+    if not getattr(r, 'is_restaurant', True):
+        return JsonResponse({'error': 'inactive', 'message': 'Restaurant is inactive'}, status=404)
+    return None
+
+
 def _table_to_public_dict(t):
     return {
         'id': t.id,
@@ -45,30 +52,39 @@ def _table_to_public_dict(t):
 
 @require_http_methods(['GET'])
 def public_restaurant_list(request):
-    """GET /api/public/restaurants/ - no auth. Returns list of all restaurants (safe fields)."""
-    qs = Restaurant.objects.all().order_by('name')
+    """GET /api/public/restaurants/ - no auth. Returns list of active restaurants (is_restaurant=True)."""
+    qs = Restaurant.objects.filter(is_restaurant=True).order_by('name')
     data = [_restaurant_to_public_dict(r) for r in qs]
     return JsonResponse({'results': data})
 
 
 @require_http_methods(['GET'])
 def public_restaurant_by_id(request, id):
-    """GET /api/public/restaurants/<id>/ - no auth. Returns restaurant info (same shape as by-slug)."""
+    """GET /api/public/restaurants/<id>/ - no auth. Returns restaurant info; 404 if inactive."""
     r = get_object_or_404(Restaurant, pk=id)
+    inactive = _check_restaurant_active(r)
+    if inactive:
+        return inactive
     return JsonResponse(_restaurant_to_public_dict(r))
 
 
 @require_http_methods(['GET'])
 def public_restaurant_by_slug(request, slug):
-    """GET /api/public/restaurant/<slug>/ - no auth. Returns restaurant info."""
+    """GET /api/public/restaurant/<slug>/ - no auth. Returns restaurant info; 404 if inactive."""
     r = get_object_or_404(Restaurant, slug=slug)
+    inactive = _check_restaurant_active(r)
+    if inactive:
+        return inactive
     return JsonResponse(_restaurant_to_public_dict(r))
 
 
 @require_http_methods(['GET'])
 def public_restaurant_tables(request, slug):
-    """GET /api/public/restaurant/<slug>/tables/ - no auth. Returns all tables for the restaurant."""
+    """GET /api/public/restaurant/<slug>/tables/ - no auth. Returns tables; 404 if restaurant inactive."""
     r = get_object_or_404(Restaurant, slug=slug)
+    inactive = _check_restaurant_active(r)
+    if inactive:
+        return inactive
     tables = r.tables.order_by('floor', 'name')
     results = [_table_to_public_dict(t) for t in tables]
     return JsonResponse({'results': results})
@@ -76,9 +92,10 @@ def public_restaurant_tables(request, slug):
 
 @require_http_methods(['GET'])
 def public_restaurant_qr(request, slug):
-    """GET /api/public/restaurant/<slug>/qr/ - no auth. Returns PNG QR code encoding menu URL.
-    When scanned, opens: {FRONTEND_BASE_URL}/menu/<slug> (the restaurant menu)."""
+    """GET /api/public/restaurant/<slug>/qr/ - no auth. Returns PNG QR code; 404 JSON if restaurant inactive."""
     r = get_object_or_404(Restaurant, slug=slug)
+    if not getattr(r, 'is_restaurant', True):
+        return JsonResponse({'error': 'inactive', 'message': 'Restaurant is inactive'}, status=404)
     base_url = getattr(settings, 'FRONTEND_BASE_URL', 'http://localhost:5173').rstrip('/')
     menu_url = f'{base_url}/menu/{r.slug}'
     qr = qrcode.QRCode(version=1, box_size=10, border=4)
@@ -94,9 +111,16 @@ def public_restaurant_qr(request, slug):
 @require_http_methods(['GET'])
 def public_restaurant_menu(request, slug):
     """GET /api/public/restaurant/<slug>/menu/ - no auth. Returns categories and products.
-    When restaurant is closed (is_open=False), returns empty categories and products so
-    customers see a closed message; staff functionality is unchanged."""
+    When restaurant is inactive (is_restaurant=False) or closed (is_open=False), returns empty menu with message."""
     r = get_object_or_404(Restaurant, slug=slug)
+    if not getattr(r, 'is_restaurant', True):
+        return JsonResponse({
+            'restaurant': _restaurant_to_public_dict(r),
+            'categories': [],
+            'products': [],
+            'inactive': True,
+            'message': 'Restaurant is inactive',
+        })
     if not r.is_open:
         return JsonResponse({
             'restaurant': _restaurant_to_public_dict(r),
@@ -143,6 +167,8 @@ def public_call_waiter(request, slug):
     Assigns to least recently active waiter present today; sends FCM to that waiter.
     """
     r = get_object_or_404(Restaurant, slug=slug)
+    if not getattr(r, 'is_restaurant', True):
+        return JsonResponse({'ok': False, 'detail': 'Restaurant is inactive'}, status=403)
     try:
         body = json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:
@@ -228,6 +254,8 @@ def public_feedback_submit(request, slug):
     Creates Feedback linked to restaurant, staff, optional order, and customer.
     """
     r = get_object_or_404(Restaurant, slug=slug)
+    if not getattr(r, 'is_restaurant', True):
+        return JsonResponse({'error': 'Restaurant is inactive'}, status=403)
     try:
         body = json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:

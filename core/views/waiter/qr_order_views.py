@@ -59,6 +59,8 @@ def waiter_qr_order_create(request):
     restaurant = get_waiter_restaurant(request)
     if not restaurant:
         return JsonResponse({'error': 'No restaurant assigned'}, status=403)
+    if not getattr(restaurant, 'is_restaurant', True):
+        return JsonResponse({'error': 'Restaurant is inactive'}, status=403)
     try:
         body = json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:

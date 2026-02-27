@@ -6,6 +6,30 @@ from decimal import Decimal
 from datetime import date, datetime
 
 
+# Days within subscription_end to consider "expiring_soon"
+SUBSCRIPTION_EXPIRING_DAYS = 7
+
+
+def get_restaurant_subscription_status(subscription_end, is_restaurant=True):
+    """
+    Return subscription_status string for a restaurant.
+    - 'inactive': is_restaurant is False (system inactive)
+    - 'expired': subscription_end < today
+    - 'expiring_soon': subscription_end within SUBSCRIPTION_EXPIRING_DAYS
+    - 'active': subscription_end >= today and is_restaurant
+    """
+    if not is_restaurant:
+        return 'inactive'
+    if subscription_end is None:
+        return 'active'
+    today = date.today()
+    if subscription_end < today:
+        return 'expired'
+    if (subscription_end - today).days <= SUBSCRIPTION_EXPIRING_DAYS:
+        return 'expiring_soon'
+    return 'active'
+
+
 def image_url_for_request(request, field):
     """
     Return full image URL for API response when request is available, else relative .url or None.

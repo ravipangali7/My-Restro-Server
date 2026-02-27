@@ -172,6 +172,8 @@ def owner_order_create(request):
             status=403,
         )
     restaurant = get_object_or_404(Restaurant, pk=restaurant_id)
+    if not getattr(restaurant, 'is_restaurant', True):
+        return JsonResponse({'error': 'Restaurant is inactive'}, status=403)
 
     payment_method = (body.get('payment_method') or '').strip()
     if not payment_method:

@@ -13,7 +13,7 @@ from core.models import (
     PaidRecord, ReceivedRecord, Purchase, Expenses, StockLog, Attendance,
     TransactionCategory, SuperSetting, PaymentStatus,
 )
-from core.utils import auth_required, image_url_for_request
+from core.utils import auth_required, image_url_for_request, get_restaurant_subscription_status
 from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 
 
@@ -32,7 +32,53 @@ def _parse_decimal(value, default=None):
         return default
 
 
+def _parse_date(value):
+    """Parse YYYY-MM-DD string to date or None."""
+    if not value:
+        return None
+    s = str(value).strip()[:10]
+    if not s:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.strptime(s, '%Y-%m-%d').date()
+    except Exception:
+        return None
+
+
+def _validate_restaurant_body(body):
+    """Return (None, None) if valid, else (JsonResponse with 400, None)."""
+    tax = body.get('tax_percent')
+    if tax is not None and str(tax).strip() != '':
+        try:
+            t = Decimal(str(tax).strip())
+            if t < 0 or t > 100:
+                return JsonResponse({'error': 'Tax percent must be between 0 and 100'}, status=400), None
+        except Exception:
+            return JsonResponse({'error': 'Invalid tax percent'}, status=400), None
+    balance = body.get('balance')
+    if balance is not None and str(balance).strip() != '':
+        try:
+            if Decimal(str(balance).strip()) < 0:
+                return JsonResponse({'error': 'Balance cannot be negative'}, status=400), None
+        except Exception:
+            pass
+    due_balance = body.get('due_balance')
+    if due_balance is not None and str(due_balance).strip() != '':
+        try:
+            if Decimal(str(due_balance).strip()) < 0:
+                return JsonResponse({'error': 'Due balance cannot be negative'}, status=400), None
+        except Exception:
+            pass
+    sub_start = _parse_date(body.get('subscription_start'))
+    sub_end = _parse_date(body.get('subscription_end'))
+    if sub_start is not None and sub_end is not None and sub_end < sub_start:
+        return JsonResponse({'error': 'Subscription end must be on or after subscription start'}, status=400), None
+    return None, None
+
+
 def _restaurant_to_dict(r, stats_extra=None, request=None):
+    is_restaurant = getattr(r, 'is_restaurant', True)
     d = {
         'id': r.id,
         'user_id': r.user_id,
@@ -40,14 +86,21 @@ def _restaurant_to_dict(r, stats_extra=None, request=None):
         'name': r.name,
         'phone': r.phone or '',
         'country_code': getattr(r, 'country_code', '') or '',
+        'email': getattr(r, 'email', '') or '',
         'logo': image_url_for_request(request, r.logo if getattr(r, 'logo', None) else None),
         'address': r.address or '',
+        'tax_percent': str(r.tax_percent) if r.tax_percent is not None else None,
+        'latitude': str(r.latitude) if r.latitude is not None else None,
+        'longitude': str(r.longitude) if r.longitude is not None else None,
         'balance': str(r.balance),
         'due_balance': str(r.due_balance),
         'ug_api': r.ug_api or '',
+        'esewa_merchant_id': getattr(r, 'esewa_merchant_id', '') or '',
         'subscription_start': r.subscription_start.isoformat() if r.subscription_start else None,
         'subscription_end': r.subscription_end.isoformat() if r.subscription_end else None,
         'is_open': r.is_open,
+        'is_restaurant': is_restaurant,
+        'subscription_status': get_restaurant_subscription_status(r.subscription_end, is_restaurant),
         'created_at': r.created_at.isoformat() if r.created_at else None,
         'updated_at': r.updated_at.isoformat() if r.updated_at else None,
     }
@@ -123,11 +176,18 @@ def super_admin_restaurant_orders(request, pk):
 @auth_required
 @require_http_methods(['GET'])
 def super_admin_restaurant_check_slug(request):
-    """GET ?slug=xxx -> { available: true } if slug not taken, else { available: false }."""
+    """GET ?slug=xxx&exclude_id=123 -> { available: true } if slug not taken (excluding pk 123)."""
     slug = (request.GET.get('slug') or '').strip()
     if not slug:
         return JsonResponse({'available': False})
-    exists = Restaurant.objects.filter(slug=slug).exists()
+    qs = Restaurant.objects.filter(slug=slug)
+    exclude_id = request.GET.get('exclude_id')
+    if exclude_id:
+        try:
+            qs = qs.exclude(pk=int(exclude_id))
+        except (TypeError, ValueError):
+            pass
+    exists = qs.exists()
     return JsonResponse({'available': not exists})
 
 
@@ -167,10 +227,12 @@ def super_admin_restaurant_list(request):
         rev = Order.objects.filter(restaurant=r).exclude(status='rejected').aggregate(s=Sum('total'))['s'] or Decimal('0')
         order_count = Order.objects.filter(restaurant=r).count()
         staff_count = r.staffs.count()
+        owner_name = getattr(r.user, 'name', '') or getattr(r.user, 'username', '') if r.user else ''
         results.append(_restaurant_to_dict(r, {
             'revenue': str(rev),
             'order_count': order_count,
             'staff_count': staff_count,
+            'owner_name': owner_name,
         }, request=request))
     return JsonResponse({'stats': stats, 'results': results})
 
@@ -384,6 +446,9 @@ def _get_request_body(request):
 @require_http_methods(['POST'])
 def super_admin_restaurant_create(request):
     body, logo_file = _get_request_body(request)
+    err_resp, _ = _validate_restaurant_body(body)
+    if err_resp:
+        return err_resp
     from core.models import User as UserModel
     user_id = body.get('user_id')
     if not user_id:
@@ -408,19 +473,49 @@ def super_admin_restaurant_create(request):
         return JsonResponse({
             'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
         }, status=400)
+    tax_percent = body.get('tax_percent')
+    if tax_percent is not None and str(tax_percent).strip() != '':
+        try:
+            tax_percent = Decimal(str(tax_percent).strip())
+        except Exception:
+            tax_percent = None
+    else:
+        tax_percent = None
+    lat = body.get('latitude')
+    lon = body.get('longitude')
+    if lat is not None and str(lat).strip() != '':
+        try:
+            lat = Decimal(str(lat).strip())
+        except Exception:
+            lat = None
+    else:
+        lat = None
+    if lon is not None and str(lon).strip() != '':
+        try:
+            lon = Decimal(str(lon).strip())
+        except Exception:
+            lon = None
+    else:
+        lon = None
     r = Restaurant(
         user=user,
         slug=slug,
         name=name,
         phone=body.get('phone', ''),
         country_code=country_code,
+        email=(body.get('email') or '').strip() or '',
         address=body.get('address', ''),
+        tax_percent=tax_percent,
+        latitude=lat,
+        longitude=lon,
         balance=_parse_decimal(body.get('balance')),
         due_balance=_parse_decimal(body.get('due_balance')),
         ug_api=body.get('ug_api') or '',
-        subscription_start=body.get('subscription_start') or None,
-        subscription_end=body.get('subscription_end') or None,
+        esewa_merchant_id=(body.get('esewa_merchant_id') or '').strip() or None,
+        subscription_start=_parse_date(body.get('subscription_start')),
+        subscription_end=_parse_date(body.get('subscription_end')),
         is_open=str(body.get('is_open', True)).lower() in ('true', '1', 'yes'),
+        is_restaurant=str(body.get('is_restaurant', True)).lower() not in ('false', '0', 'no'),
     )
     if logo_file:
         r.logo = logo_file
@@ -434,14 +529,22 @@ def super_admin_restaurant_create(request):
 def super_admin_restaurant_update(request, pk):
     r = get_object_or_404(Restaurant, pk=pk)
     body, logo_file = _get_request_body(request)
+    err_resp, _ = _validate_restaurant_body(body)
+    if err_resp:
+        return err_resp
     if logo_file:
         r.logo = logo_file
-    for key in ('slug', 'name', 'phone', 'address', 'ug_api', 'is_open'):
+    # Only update logo when new file provided; otherwise keep existing
+    for key in ('slug', 'name', 'phone', 'address', 'ug_api', 'is_open', 'email', 'esewa_merchant_id'):
         if key in body:
             val = body[key]
             if key == 'is_open':
                 val = str(val).lower() in ('true', '1', 'yes')
+            elif key in ('email', 'esewa_merchant_id'):
+                val = (val or '').strip() or ('' if key == 'email' else None)
             setattr(r, key, val)
+    if 'is_restaurant' in body:
+        r.is_restaurant = str(body['is_restaurant']).lower() not in ('false', '0', 'no')
     if 'country_code' in body:
         new_cc = normalize_country_code(str(body.get('country_code', '')).strip())
         if new_cc and new_cc not in ALLOWED_COUNTRY_CODES:
@@ -449,14 +552,46 @@ def super_admin_restaurant_update(request, pk):
                 'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
             }, status=400)
         r.country_code = new_cc
+    if 'tax_percent' in body:
+        v = body['tax_percent']
+        if v is not None and str(v).strip() != '':
+            try:
+                r.tax_percent = Decimal(str(v).strip())
+            except Exception:
+                pass
+        else:
+            r.tax_percent = None
+    if 'latitude' in body:
+        v = body['latitude']
+        if v is not None and str(v).strip() != '':
+            try:
+                r.latitude = Decimal(str(v).strip())
+            except Exception:
+                pass
+        else:
+            r.latitude = None
+    if 'longitude' in body:
+        v = body['longitude']
+        if v is not None and str(v).strip() != '':
+            try:
+                r.longitude = Decimal(str(v).strip())
+            except Exception:
+                pass
+        else:
+            r.longitude = None
     if 'balance' in body:
         r.balance = _parse_decimal(body['balance'])
     if 'due_balance' in body:
         r.due_balance = _parse_decimal(body['due_balance'])
     if 'subscription_start' in body:
-        r.subscription_start = body['subscription_start'] or None
+        r.subscription_start = _parse_date(body['subscription_start'])
     if 'subscription_end' in body:
-        r.subscription_end = body['subscription_end'] or None
+        r.subscription_end = _parse_date(body['subscription_end'])
+    # Slug uniqueness: exclude current pk
+    if 'slug' in body and body.get('slug'):
+        new_slug = str(body['slug']).strip()
+        if new_slug and Restaurant.objects.filter(slug=new_slug).exclude(pk=r.pk).exists():
+            return JsonResponse({'error': 'slug already exists'}, status=400)
     r.save()
     return JsonResponse(_restaurant_to_dict(r, request=request))
 

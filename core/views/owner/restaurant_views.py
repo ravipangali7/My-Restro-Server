@@ -27,12 +27,56 @@ from core.models import (
     Attendance,
     SuperSetting,
 )
-from core.utils import get_restaurant_ids, auth_required, is_owner_only
+from core.utils import get_restaurant_ids, auth_required, is_owner_only, image_url_for_request, get_restaurant_subscription_status
 from core.permissions import is_manager
 from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 
 
-def _restaurant_to_dict(r):
+def _parse_date(body_value):
+    """Parse YYYY-MM-DD from body value to date or None."""
+    if not body_value:
+        return None
+    s = str(body_value).strip()[:10]
+    if not s:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.strptime(s, '%Y-%m-%d').date()
+    except Exception:
+        return None
+
+
+def _validate_restaurant_body(body):
+    """Return (None, None) if valid, else (JsonResponse 400, None)."""
+    tax = body.get('tax_percent')
+    if tax is not None and str(tax).strip() != '':
+        try:
+            t = Decimal(str(tax).strip())
+            if t < 0 or t > 100:
+                return JsonResponse({'error': 'Tax percent must be between 0 and 100'}, status=400), None
+        except Exception:
+            return JsonResponse({'error': 'Invalid tax percent'}, status=400), None
+    if body.get('balance') is not None and str(body.get('balance')).strip() != '':
+        try:
+            if Decimal(str(body['balance']).strip()) < 0:
+                return JsonResponse({'error': 'Balance cannot be negative'}, status=400), None
+        except Exception:
+            pass
+    if body.get('due_balance') is not None and str(body.get('due_balance')).strip() != '':
+        try:
+            if Decimal(str(body['due_balance']).strip()) < 0:
+                return JsonResponse({'error': 'Due balance cannot be negative'}, status=400), None
+        except Exception:
+            pass
+    sub_start = _parse_date(body.get('subscription_start'))
+    sub_end = _parse_date(body.get('subscription_end'))
+    if sub_start is not None and sub_end is not None and sub_end < sub_start:
+        return JsonResponse({'error': 'Subscription end must be on or after subscription start'}, status=400), None
+    return None, None
+
+
+def _restaurant_to_dict(r, request=None):
+    is_restaurant = getattr(r, 'is_restaurant', True)
     return {
         'id': r.id,
         'user_id': r.user_id,
@@ -40,14 +84,21 @@ def _restaurant_to_dict(r):
         'name': r.name,
         'phone': r.phone or '',
         'country_code': getattr(r, 'country_code', '') or '',
-        'logo': r.logo.url if r.logo else None,
+        'email': getattr(r, 'email', '') or '',
+        'logo': image_url_for_request(request, r.logo if getattr(r, 'logo', None) else None),
         'address': r.address or '',
+        'tax_percent': str(r.tax_percent) if r.tax_percent is not None else None,
+        'latitude': str(r.latitude) if r.latitude is not None else None,
+        'longitude': str(r.longitude) if r.longitude is not None else None,
         'balance': str(r.balance),
         'due_balance': str(r.due_balance),
         'ug_api': r.ug_api or '',
+        'esewa_merchant_id': getattr(r, 'esewa_merchant_id', '') or '',
         'subscription_start': str(r.subscription_start) if r.subscription_start else None,
         'subscription_end': str(r.subscription_end) if r.subscription_end else None,
         'is_open': r.is_open,
+        'is_restaurant': is_restaurant,
+        'subscription_status': get_restaurant_subscription_status(r.subscription_end, is_restaurant),
         'created_at': r.created_at.isoformat() if r.created_at else None,
         'updated_at': r.updated_at.isoformat() if r.updated_at else None,
     }
@@ -56,11 +107,18 @@ def _restaurant_to_dict(r):
 @auth_required
 @require_http_methods(['GET'])
 def owner_restaurant_check_slug(request):
-    """GET ?slug=xxx -> { available: true } if slug not taken, else { available: false }."""
+    """GET ?slug=xxx&exclude_id=123 -> { available: true } if slug not taken (excluding pk 123)."""
     slug = (request.GET.get('slug') or '').strip()
     if not slug:
         return JsonResponse({'available': False})
-    exists = Restaurant.objects.filter(slug=slug).exists()
+    qs = Restaurant.objects.filter(slug=slug)
+    exclude_id = request.GET.get('exclude_id')
+    if exclude_id:
+        try:
+            qs = qs.exclude(pk=int(exclude_id))
+        except (TypeError, ValueError):
+            pass
+    exists = qs.exists()
     return JsonResponse({'available': not exists})
 
 
@@ -72,7 +130,7 @@ def owner_restaurant_list(request):
     qs = Restaurant.objects.select_related('user').order_by('name')
     if restaurant_ids and not getattr(request.user, 'is_superuser', False):
         qs = qs.filter(id__in=restaurant_ids)
-    data = [_restaurant_to_dict(r) for r in qs]
+    data = [_restaurant_to_dict(r, request=request) for r in qs]
     return JsonResponse({'results': data})
 
 
@@ -88,13 +146,13 @@ def owner_restaurant_detail(request, pk):
             status=403,
         )
     if request.GET.get('deep') == '1':
-        return JsonResponse(_owner_restaurant_deep_report(r))
-    return JsonResponse(_restaurant_to_dict(r))
+        return JsonResponse(_owner_restaurant_deep_report(r, request))
+    return JsonResponse(_restaurant_to_dict(r, request=request))
 
 
-def _owner_restaurant_deep_report(r):
+def _owner_restaurant_deep_report(r, request=None):
     """Build deep relation report for one restaurant (same shape as super_admin detail)."""
-    data = _restaurant_to_dict(r)
+    data = _restaurant_to_dict(r, request=request)
     today = timezone.now().date()
     data['subscription_active'] = r.subscription_end is not None and r.subscription_end >= today
 
@@ -138,7 +196,7 @@ def _owner_restaurant_deep_report(r):
         'name': getattr(owner_user, 'name', '') or getattr(owner_user, 'username', ''),
         'phone': getattr(owner_user, 'phone', '') or '',
         'country_code': getattr(owner_user, 'country_code', '') or '',
-        'image': owner_user.image.url if getattr(owner_user, 'image', None) and owner_user.image else None,
+        'image': image_url_for_request(request, getattr(owner_user, 'image', None)),
     } if owner_user else None
 
     staff_list = Staff.objects.filter(restaurant=r).select_related('user')
@@ -286,11 +344,14 @@ def _owner_restaurant_deep_report(r):
 @auth_required
 @require_http_methods(['POST'])
 def owner_restaurant_create(request):
-    """Create restaurant. JSON: slug, name, phone?, address?, ug_api?, is_open?, etc."""
+    """Create restaurant. JSON: slug, name, phone?, address?, ug_api?, is_open?, email?, tax_percent?, latitude?, longitude?, esewa_merchant_id?, is_restaurant?, etc."""
     try:
         body = json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    err_resp, _ = _validate_restaurant_body(body)
+    if err_resp:
+        return err_resp
     slug = (body.get('slug') or '').strip()
     name = (body.get('name') or '').strip()
     if not slug or not name:
@@ -305,40 +366,64 @@ def owner_restaurant_create(request):
     user = request.user
     if not getattr(user, 'is_owner', False) and not getattr(user, 'is_superuser', False):
         return JsonResponse({'error': 'Forbidden'}, status=403)
+    tax_percent = body.get('tax_percent')
+    if tax_percent is not None and str(tax_percent).strip() != '':
+        try:
+            tax_percent = Decimal(str(tax_percent).strip())
+        except Exception:
+            tax_percent = None
+    else:
+        tax_percent = None
+    lat = body.get('latitude')
+    lon = body.get('longitude')
+    if lat is not None and str(lat).strip() != '':
+        try:
+            lat = Decimal(str(lat).strip())
+        except Exception:
+            lat = None
+    else:
+        lat = None
+    if lon is not None and str(lon).strip() != '':
+        try:
+            lon = Decimal(str(lon).strip())
+        except Exception:
+            lon = None
+    else:
+        lon = None
     r = Restaurant(
         user=user,
         slug=slug,
         name=name,
         phone=body.get('phone', '') or '',
         country_code=country_code,
+        email=(body.get('email') or '').strip() or '',
         address=body.get('address', '') or '',
+        tax_percent=tax_percent,
+        latitude=lat,
+        longitude=lon,
         ug_api=body.get('ug_api') or None,
+        esewa_merchant_id=(body.get('esewa_merchant_id') or '').strip() or None,
         is_open=bool(body.get('is_open', True)),
+        is_restaurant=bool(body.get('is_restaurant', True)),
     )
     if body.get('balance') is not None:
         try:
-            r.balance = Decimal(str(body['balance']))
+            b = Decimal(str(body['balance']))
+            if b >= 0:
+                r.balance = b
         except Exception:
             pass
     if body.get('due_balance') is not None:
         try:
-            r.due_balance = Decimal(str(body['due_balance']))
+            d = Decimal(str(body['due_balance']))
+            if d >= 0:
+                r.due_balance = d
         except Exception:
             pass
-    if body.get('subscription_start'):
-        try:
-            from datetime import datetime
-            r.subscription_start = datetime.strptime(body['subscription_start'][:10], '%Y-%m-%d').date()
-        except Exception:
-            pass
-    if body.get('subscription_end'):
-        try:
-            from datetime import datetime
-            r.subscription_end = datetime.strptime(body['subscription_end'][:10], '%Y-%m-%d').date()
-        except Exception:
-            pass
+    r.subscription_start = _parse_date(body.get('subscription_start'))
+    r.subscription_end = _parse_date(body.get('subscription_end'))
     r.save()
-    return JsonResponse(_restaurant_to_dict(r), status=201)
+    return JsonResponse(_restaurant_to_dict(r, request=request), status=201)
 
 
 @csrf_exempt
@@ -355,7 +440,7 @@ def owner_restaurant_update(request, pk):
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
 
-    # Manager can only update is_open and basic info (name, phone, address)
+    # Manager can only update is_open and basic info (name, phone, address); cannot change is_restaurant
     if is_manager(request.user) and not getattr(request.user, 'is_superuser', False):
         if 'is_open' in body:
             r.is_open = bool(body['is_open'])
@@ -366,12 +451,18 @@ def owner_restaurant_update(request, pk):
         if 'address' in body:
             r.address = str(body.get('address', ''))
         r.save()
-        return JsonResponse(_restaurant_to_dict(r))
+        return JsonResponse(_restaurant_to_dict(r, request=request))
+
+    err_resp, _ = _validate_restaurant_body(body)
+    if err_resp:
+        return err_resp
 
     if 'name' in body:
         r.name = str(body['name']).strip() or r.name
     if 'phone' in body:
         r.phone = str(body.get('phone', ''))
+    if 'email' in body:
+        r.email = (body.get('email') or '').strip() or ''
     if 'country_code' in body:
         new_cc = normalize_country_code(str(body.get('country_code', '')).strip())
         if new_cc and new_cc not in ALLOWED_COUNTRY_CODES:
@@ -383,36 +474,65 @@ def owner_restaurant_update(request, pk):
         r.address = str(body.get('address', ''))
     if 'ug_api' in body:
         r.ug_api = body.get('ug_api') or None
+    if 'esewa_merchant_id' in body:
+        r.esewa_merchant_id = (body.get('esewa_merchant_id') or '').strip() or None
     if 'is_open' in body:
         r.is_open = bool(body['is_open'])
+    if 'is_restaurant' in body:
+        r.is_restaurant = bool(body['is_restaurant'])
+    if 'tax_percent' in body:
+        v = body['tax_percent']
+        if v is not None and str(v).strip() != '':
+            try:
+                r.tax_percent = Decimal(str(v).strip())
+            except Exception:
+                pass
+        else:
+            r.tax_percent = None
+    if 'latitude' in body:
+        v = body['latitude']
+        if v is not None and str(v).strip() != '':
+            try:
+                r.latitude = Decimal(str(v).strip())
+            except Exception:
+                pass
+        else:
+            r.latitude = None
+    if 'longitude' in body:
+        v = body['longitude']
+        if v is not None and str(v).strip() != '':
+            try:
+                r.longitude = Decimal(str(v).strip())
+            except Exception:
+                pass
+        else:
+            r.longitude = None
     if 'balance' in body:
         try:
-            r.balance = Decimal(str(body['balance']))
+            b = Decimal(str(body['balance']))
+            if b >= 0:
+                r.balance = b
         except Exception:
             pass
     if 'due_balance' in body:
         try:
-            r.due_balance = Decimal(str(body['due_balance']))
+            d = Decimal(str(body['due_balance']))
+            if d >= 0:
+                r.due_balance = d
         except Exception:
             pass
-    if 'subscription_start' in body and body['subscription_start']:
-        try:
-            from datetime import datetime
-            r.subscription_start = datetime.strptime(str(body['subscription_start'])[:10], '%Y-%m-%d').date()
-        except Exception:
-            pass
-    if 'subscription_end' in body and body['subscription_end']:
-        try:
-            from datetime import datetime
-            r.subscription_end = datetime.strptime(str(body['subscription_end'])[:10], '%Y-%m-%d').date()
-        except Exception:
-            pass
-    if 'slug' in body and body['slug']:
+    if 'subscription_start' in body:
+        r.subscription_start = _parse_date(body['subscription_start'])
+    if 'subscription_end' in body:
+        r.subscription_end = _parse_date(body['subscription_end'])
+    if 'slug' in body and body.get('slug'):
         new_slug = str(body['slug']).strip()
-        if new_slug and new_slug != r.slug and not Restaurant.objects.filter(slug=new_slug).exists():
+        if new_slug and Restaurant.objects.filter(slug=new_slug).exclude(pk=r.pk).exists():
+            return JsonResponse({'error': 'slug already exists'}, status=400)
+        if new_slug:
             r.slug = new_slug
     r.save()
-    return JsonResponse(_restaurant_to_dict(r))
+    return JsonResponse(_restaurant_to_dict(r, request=request))
 
 
 @auth_required

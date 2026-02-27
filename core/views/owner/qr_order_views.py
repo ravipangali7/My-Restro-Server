@@ -73,6 +73,8 @@ def owner_qr_order_create(request):
     if restaurant_id not in rid:
         return JsonResponse({'error': 'Restaurant not allowed'}, status=403)
     restaurant = get_object_or_404(Restaurant, pk=restaurant_id)
+    if not getattr(restaurant, 'is_restaurant', True):
+        return JsonResponse({'error': 'Restaurant is inactive'}, status=403)
     quantity = int(body.get('quantity', 1))
     total = Decimal(str(body.get('total', 0)))
     q = QrStandOrder(
