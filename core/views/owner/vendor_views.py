@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from core.models import Vendor, Restaurant, PurchaseItem, PaidRecord
 from core.utils import get_restaurant_ids, auth_required
-from core.constants import ALLOWED_COUNTRY_CODES
+from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 
 
 def _vendor_to_dict(v, to_pay=None, to_receive=None):
@@ -82,7 +82,7 @@ def owner_vendor_create(request):
     phone = (body.get('phone') or '').strip()
     if not phone:
         return JsonResponse({'error': 'phone required'}, status=400)
-    country_code = (body.get('country_code') or '').strip()
+    country_code = normalize_country_code((body.get('country_code') or '').strip())
     if country_code and country_code not in ALLOWED_COUNTRY_CODES:
         return JsonResponse({'error': 'Invalid country_code'}, status=400)
     v = Vendor(
@@ -115,7 +115,7 @@ def owner_vendor_update(request, pk):
     if 'phone' in body:
         v.phone = str(body.get('phone', '')) or ''
     if 'country_code' in body:
-        v.country_code = str(body.get('country_code', '')) or ''
+        v.country_code = normalize_country_code(str(body.get('country_code', '')).strip()) or ''
     v.save()
     return JsonResponse(_vendor_to_dict(v))
 

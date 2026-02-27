@@ -13,7 +13,7 @@ from django.core.cache import cache
 
 from core.models import Customer, CustomerToken, User
 from core.utils import customer_auth_required
-from core.constants import ALLOWED_COUNTRY_CODES
+from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 
 
 def _normalize_phone(phone):
@@ -79,7 +79,7 @@ def customer_register(request):
     name = (body.get('name') or '').strip()
     raw_phone = _normalize_phone(body.get('phone'))
     phone = _phone_for_storage(raw_phone) if raw_phone else ''
-    country_code = (body.get('country_code') or '').strip()
+    country_code = normalize_country_code((body.get('country_code') or '').strip())
     address = (body.get('address') or '').strip()
     password = body.get('password', '')
     fcm_token = (body.get('fcm_token') or '').strip()
@@ -89,7 +89,7 @@ def customer_register(request):
         return JsonResponse({'error': 'Country code is required.'}, status=400)
     if country_code not in ALLOWED_COUNTRY_CODES:
         return JsonResponse({
-            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+            'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
         }, status=400)
     if not phone:
         return JsonResponse({'error': 'phone required'}, status=400)
@@ -253,14 +253,14 @@ def customer_request_reset(request):
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
     raw_phone = _normalize_phone(body.get('phone'))
     phone = _phone_for_storage(raw_phone) if raw_phone else ''
-    country_code = (body.get('country_code') or '').strip()
+    country_code = normalize_country_code((body.get('country_code') or '').strip())
     if not phone:
         return JsonResponse({'error': 'phone required'}, status=400)
     if not country_code:
         return JsonResponse({'error': 'Country code is required.'}, status=400)
     if country_code not in ALLOWED_COUNTRY_CODES:
         return JsonResponse({
-            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+            'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
         }, status=400)
     rate_key = OTP_RATE_PREFIX + country_code + '_' + phone
     if cache.get(rate_key):
@@ -290,7 +290,7 @@ def customer_confirm_reset(request):
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
     raw_phone = _normalize_phone(body.get('phone'))
     phone = _phone_for_storage(raw_phone) if raw_phone else ''
-    country_code = (body.get('country_code') or '').strip()
+    country_code = normalize_country_code((body.get('country_code') or '').strip())
     otp = (body.get('otp') or '').strip()
     new_password = body.get('new_password', '')
     if not phone:
@@ -299,7 +299,7 @@ def customer_confirm_reset(request):
         return JsonResponse({'error': 'Country code is required.'}, status=400)
     if country_code not in ALLOWED_COUNTRY_CODES:
         return JsonResponse({
-            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+            'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
         }, status=400)
     if not otp:
         return JsonResponse({'error': 'otp required'}, status=400)

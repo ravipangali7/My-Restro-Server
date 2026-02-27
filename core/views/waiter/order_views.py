@@ -10,7 +10,7 @@ from core.models import Order, OrderItem, OrderStatus, OrderType, PaymentStatus,
 from core.payment_qr import generate_esewa_qr_png
 from core.utils import get_waiter_staff_id
 from core.permissions import get_waiter_restaurant
-from core.constants import ALLOWED_COUNTRY_CODES
+from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 from core.invoice_utils import get_invoice_extras
 
 # Waiter may only move: pending -> accepted -> running -> ready -> served (cannot set rejected)
@@ -233,7 +233,7 @@ def waiter_order_create(request):
     if not customer_id:
         name = (body.get('customer_name') or '').strip()
         phone = (body.get('customer_phone') or '').strip()
-        country_code = (body.get('country_code') or '').strip()
+        country_code = normalize_country_code((body.get('country_code') or '').strip())
         if not name:
             return JsonResponse({'error': 'customer_name required'}, status=400)
         if not phone:

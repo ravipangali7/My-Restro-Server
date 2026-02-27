@@ -14,7 +14,7 @@ from core.models import (
     TransactionCategory, SuperSetting, PaymentStatus,
 )
 from core.utils import auth_required, image_url_for_request
-from core.constants import ALLOWED_COUNTRY_CODES
+from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 
 
 def _parse_decimal(value, default=None):
@@ -403,10 +403,10 @@ def super_admin_restaurant_create(request):
         return JsonResponse({'error': 'slug and name required'}, status=400)
     if Restaurant.objects.filter(slug=slug).exists():
         return JsonResponse({'error': 'slug already exists'}, status=400)
-    country_code = (body.get('country_code') or '').strip()
+    country_code = normalize_country_code((body.get('country_code') or '').strip())
     if country_code and country_code not in ALLOWED_COUNTRY_CODES:
         return JsonResponse({
-            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+            'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
         }, status=400)
     r = Restaurant(
         user=user,
@@ -443,10 +443,10 @@ def super_admin_restaurant_update(request, pk):
                 val = str(val).lower() in ('true', '1', 'yes')
             setattr(r, key, val)
     if 'country_code' in body:
-        new_cc = str(body.get('country_code', '')).strip()
+        new_cc = normalize_country_code(str(body.get('country_code', '')).strip())
         if new_cc and new_cc not in ALLOWED_COUNTRY_CODES:
             return JsonResponse({
-                'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+                'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
             }, status=400)
         r.country_code = new_cc
     if 'balance' in body:

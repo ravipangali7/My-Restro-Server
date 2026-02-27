@@ -71,21 +71,21 @@ def owner_customer_create(request):
         body = json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
-    from core.constants import ALLOWED_COUNTRY_CODES
+    from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
     from core.views.customer.auth_views import _phone_for_storage, _normalize_phone
     name = (body.get('name') or '').strip()
     if not name:
         return JsonResponse({'error': 'name required'}, status=400)
     raw_phone = _normalize_phone(body.get('phone'))
     phone = _phone_for_storage(raw_phone) if raw_phone else ''
-    country_code = (body.get('country_code') or '').strip()
+    country_code = normalize_country_code((body.get('country_code') or '').strip())
     if not phone:
         return JsonResponse({'error': 'phone required'}, status=400)
     if not country_code:
         return JsonResponse({'error': 'Country code is required.'}, status=400)
     if country_code not in ALLOWED_COUNTRY_CODES:
         return JsonResponse({
-            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+            'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
         }, status=400)
     if Customer.objects.filter(country_code=country_code, phone=phone).exists():
         return JsonResponse({'error': 'Customer with this country code and phone already exists'}, status=400)

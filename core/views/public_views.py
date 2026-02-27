@@ -15,6 +15,7 @@ from core.models import (
     WaiterCall, WaiterCallStatus, Table,
 )
 from core.fcm import send_fcm_to_token
+from core.constants import normalize_country_code
 from core.services import get_or_create_customer_for_restaurant
 
 
@@ -262,7 +263,7 @@ def public_feedback_submit(request, slug):
         order = Order.objects.filter(pk=order_id, restaurant=r).first()
     name = (body.get('name') or '').strip() or 'Guest'
     phone = (body.get('phone') or '').strip()
-    country_code = (body.get('country_code') or '').strip()
+    country_code = normalize_country_code((body.get('country_code') or '').strip()) or None
     if not phone:
         return JsonResponse({'error': 'phone required for feedback'}, status=400)
     customer, _ = get_or_create_customer_for_restaurant(r, phone, name=name or phone, country_code=country_code or None)

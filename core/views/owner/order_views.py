@@ -9,7 +9,7 @@ from django.db.models import Sum, Count
 
 from core.models import Order, OrderItem, Restaurant, OrderStatus, OrderType, PaymentStatus, Customer, Delivery, OrderType, Delivery, DeliveryStatus
 from core.utils import get_restaurant_ids, auth_required
-from core.constants import ALLOWED_COUNTRY_CODES
+from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 from core.invoice_utils import get_invoice_extras
 
 
@@ -181,7 +181,7 @@ def owner_order_create(request):
     if not customer_id:
         name = (body.get('customer_name') or '').strip()
         phone = (body.get('customer_phone') or '').strip()
-        country_code = (body.get('country_code') or '').strip()
+        country_code = normalize_country_code((body.get('country_code') or '').strip())
         if not name:
             return JsonResponse({'error': 'customer_name required'}, status=400)
         if not phone:

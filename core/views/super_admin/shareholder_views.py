@@ -10,7 +10,7 @@ from django.contrib.auth import get_user_model
 from django.db.models import Sum, Q
 from core.models import SuperSetting, ShareholderWithdrawal, Transaction, TransactionCategory, WithdrawalStatus
 from core.utils import auth_required, image_url_for_request
-from core.constants import ALLOWED_COUNTRY_CODES
+from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 
 User = get_user_model()
 
@@ -154,7 +154,7 @@ def super_admin_shareholder_list(request):
 def super_admin_shareholder_create(request):
     body, image_file = _get_request_body(request)
     phone = (body.get('phone') or '').strip()
-    country_code = (body.get('country_code') or '').strip()
+    country_code = normalize_country_code((body.get('country_code') or '').strip())
     name = (body.get('name') or '').strip()
     if not phone:
         return JsonResponse({'error': 'phone required'}, status=400)
@@ -162,7 +162,7 @@ def super_admin_shareholder_create(request):
         return JsonResponse({'error': 'Country code is required.'}, status=400)
     if country_code not in ALLOWED_COUNTRY_CODES:
         return JsonResponse({
-            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+            'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
         }, status=400)
     username = f'{country_code}_{phone}'
     user, _ = User.objects.get_or_create(
@@ -191,22 +191,22 @@ def super_admin_shareholder_update(request, pk):
         u.name = str(body['name']).strip()
     if 'phone' in body:
         new_phone = str(body['phone']).strip()
-        new_cc = str(body.get('country_code') or u.country_code or '').strip()
+        new_cc = normalize_country_code(str(body.get('country_code') or u.country_code or '').strip())
         if new_phone:
             if not new_cc:
                 return JsonResponse({'error': 'Country code is required.'}, status=400)
             if new_cc not in ALLOWED_COUNTRY_CODES:
                 return JsonResponse({
-                    'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+                    'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
                 }, status=400)
             if User.objects.filter(country_code=new_cc, phone=new_phone).exclude(pk=u.pk).exists():
                 return JsonResponse({'error': 'Another user with this country code and phone already exists'}, status=400)
         u.phone = new_phone
     if 'country_code' in body:
-        new_cc = str(body.get('country_code', '')).strip()
+        new_cc = normalize_country_code(str(body.get('country_code', '')).strip())
         if new_cc and new_cc not in ALLOWED_COUNTRY_CODES:
             return JsonResponse({
-                'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+                'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
             }, status=400)
         u.country_code = new_cc
     if 'share_percentage' in body:

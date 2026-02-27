@@ -14,7 +14,7 @@ from django.db.models import Count, Sum, Avg
 from core.models import Staff, Restaurant, Table, Order, Feedback, PaidRecord
 from core.utils import get_restaurant_ids, auth_required, image_url_for_request
 from core.permissions import is_manager
-from core.constants import ALLOWED_COUNTRY_CODES
+from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 
 User = get_user_model()
 
@@ -174,7 +174,7 @@ def owner_user_create(request):
     """Create a non-owner user for staff assignment. Accepts phone, country_code (required), password, name (optional), image (optional multipart)."""
     body, image_file = _parse_user_create_request(request)
     phone = (body.get('phone') or '').strip()
-    country_code = (body.get('country_code') or '').strip()
+    country_code = normalize_country_code((body.get('country_code') or '').strip())
     password = body.get('password', '')
     if not phone:
         return JsonResponse({'error': 'phone required'}, status=400)
@@ -182,7 +182,7 @@ def owner_user_create(request):
         return JsonResponse({'error': 'Country code is required.'}, status=400)
     if country_code not in ALLOWED_COUNTRY_CODES:
         return JsonResponse({
-            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+            'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
         }, status=400)
     if not password:
         return JsonResponse({'error': 'password required'}, status=400)

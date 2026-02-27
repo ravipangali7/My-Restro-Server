@@ -29,7 +29,7 @@ from core.models import (
 )
 from core.utils import get_restaurant_ids, auth_required, is_owner_only
 from core.permissions import is_manager
-from core.constants import ALLOWED_COUNTRY_CODES
+from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 
 
 def _restaurant_to_dict(r):
@@ -297,10 +297,10 @@ def owner_restaurant_create(request):
         return JsonResponse({'error': 'slug and name required'}, status=400)
     if Restaurant.objects.filter(slug=slug).exists():
         return JsonResponse({'error': 'slug already exists'}, status=400)
-    country_code = (body.get('country_code') or '').strip()
+    country_code = normalize_country_code((body.get('country_code') or '').strip())
     if country_code and country_code not in ALLOWED_COUNTRY_CODES:
         return JsonResponse({
-            'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+            'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
         }, status=400)
     user = request.user
     if not getattr(user, 'is_owner', False) and not getattr(user, 'is_superuser', False):
@@ -373,10 +373,10 @@ def owner_restaurant_update(request, pk):
     if 'phone' in body:
         r.phone = str(body.get('phone', ''))
     if 'country_code' in body:
-        new_cc = str(body.get('country_code', '')).strip()
+        new_cc = normalize_country_code(str(body.get('country_code', '')).strip())
         if new_cc and new_cc not in ALLOWED_COUNTRY_CODES:
             return JsonResponse({
-                'error': 'Invalid country code. Only +91 (India) and +977 (Nepal) are allowed.'
+                'error': 'Invalid country code. Only 91 (India) and 977 (Nepal) are allowed.'
             }, status=400)
         r.country_code = new_cc
     if 'address' in body:
