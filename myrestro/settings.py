@@ -75,7 +75,9 @@ REST_FRAMEWORK = {
 }
 
 # CORS: allow frontend origins (credentials require explicit origins, not *)
-# Set CORS_ALLOWED_ORIGINS env as comma-separated list to override in production (e.g. "https://restrohub.sewabyapar.com,https://app.example.com")
+# Production: set CORS_ALLOWED_ORIGINS=https://restrohub.sewabyapar.com so 401/4xx/5xx responses
+# include CORS headers and the browser allows the frontend to read the response.
+# Set CORS_ALLOWED_ORIGINS env as comma-separated list to override (e.g. "https://restrohub.sewabyapar.com,https://app.example.com")
 CORS_ALLOW_ALL_ORIGINS = False
 _default_cors_origins = [
     "https://restrohub.sewabyapar.com",
