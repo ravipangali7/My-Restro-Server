@@ -66,7 +66,7 @@ def super_admin_owner_list(request):
         return err
     qs = User.objects.filter(is_owner=True).annotate(
         restaurant_count=Count('restaurants')
-    ).order_by('-date_joined')
+    ).order_by('-created_at')
     search = request.GET.get('search', '').strip()
     if search:
         qs = qs.filter(
@@ -79,9 +79,21 @@ def super_admin_owner_list(request):
     stats = {'total': total, 'pending': pending, 'approved': approved, 'rejected': rejected}
     results = []
     for u in qs[:100]:
-        d = _owner_to_dict(u, request)
-        d['restaurant_count'] = u.restaurant_count
-        results.append(d)
+        try:
+            d = _owner_to_dict(u, request)
+            d['restaurant_count'] = getattr(u, 'restaurant_count', u.restaurants.count() if hasattr(u, 'restaurants') else 0)
+            results.append(d)
+        except Exception:
+            results.append({
+                'id': u.id,
+                'name': getattr(u, 'name', '') or getattr(u, 'username', ''),
+                'phone': getattr(u, 'phone', ''),
+                'country_code': getattr(u, 'country_code', ''),
+                'email': getattr(u, 'email', ''),
+                'is_active': getattr(u, 'is_active', True),
+                'kyc_status': getattr(u, 'kyc_status', 'pending'),
+                'restaurant_count': getattr(u, 'restaurant_count', 0),
+            })
     return JsonResponse({'stats': stats, 'results': results})
 
 

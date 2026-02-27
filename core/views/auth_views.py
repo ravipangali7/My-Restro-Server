@@ -137,18 +137,27 @@ def logout(request):
 
 def _staff_profile_to_dict(user, request=None):
     """Profile fields for GET/PATCH auth/profile (staff only). Includes kyc_status and share_percentage for owner."""
-    out = {
-        'id': user.id,
-        'name': getattr(user, 'name', '') or getattr(user, 'username', '') or '',
-        'country_code': getattr(user, 'country_code', '') or '',
-        'phone': getattr(user, 'phone', '') or '',
-        'image': image_url_for_request(request, getattr(user, 'image', None)),
-    }
-    if getattr(user, 'is_owner', False):
-        out['kyc_status'] = getattr(user, 'kyc_status', 'pending')
-        out['is_shareholder'] = getattr(user, 'is_shareholder', False)
-        out['share_percentage'] = str(getattr(user, 'share_percentage', 0) or 0)
-    return out
+    try:
+        out = {
+            'id': getattr(user, 'id', getattr(user, 'pk', 0)),
+            'name': getattr(user, 'name', '') or getattr(user, 'username', '') or '',
+            'country_code': getattr(user, 'country_code', '') or '',
+            'phone': getattr(user, 'phone', '') or '',
+            'image': image_url_for_request(request, getattr(user, 'image', None)),
+        }
+        if getattr(user, 'is_owner', False):
+            out['kyc_status'] = getattr(user, 'kyc_status', 'pending')
+            out['is_shareholder'] = getattr(user, 'is_shareholder', False)
+            out['share_percentage'] = str(getattr(user, 'share_percentage', 0) or 0)
+        return out
+    except Exception:
+        return {
+            'id': getattr(user, 'id', getattr(user, 'pk', 0)),
+            'name': getattr(user, 'name', ''),
+            'country_code': getattr(user, 'country_code', ''),
+            'phone': getattr(user, 'phone', ''),
+            'image': None,
+        }
 
 
 def _get_profile_body(request):

@@ -10,17 +10,23 @@ def image_url_for_request(request, field):
     """
     Return full image URL for API response when request is available, else relative .url or None.
     Use in list/detail views so frontend receives a usable URL (avoids BASE_URL/MEDIA_URL mismatch).
+    Never raises: returns None on any error (missing file, DisallowedHost, etc.).
     """
-    if field is None or not getattr(field, 'url', None):
-        return None
-    if not field:
+    if field is None or not field:
         return None
     try:
+        if not getattr(field, 'url', None):
+            return None
         url = field.url
-    except (ValueError, AttributeError):
+    except Exception:
         return None
-    if request and url:
-        return request.build_absolute_uri(url)
+    if not url:
+        return None
+    if request:
+        try:
+            return request.build_absolute_uri(url)
+        except Exception:
+            return url
     return url
 
 
