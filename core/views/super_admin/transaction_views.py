@@ -2,9 +2,10 @@
 from decimal import Decimal
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
-from django.db.models import Sum, Count
+from django.db.models import Sum, Count, Q
 
 from core.models import Transaction
+from core.utils import paginate_queryset
 
 
 def _tx_to_dict(t):
@@ -23,13 +24,19 @@ def _tx_to_dict(t):
 
 @require_http_methods(['GET'])
 def super_admin_transaction_list(request):
-    qs = Transaction.objects.all().select_related('restaurant')
-    date_from = request.GET.get('date_from')
-    date_to = request.GET.get('date_to')
+    qs = Transaction.objects.all().select_related('restaurant').order_by('-created_at')
+    date_from = request.GET.get('date_from') or request.GET.get('start_date')
+    date_to = request.GET.get('date_to') or request.GET.get('end_date')
     if date_from:
         qs = qs.filter(created_at__date__gte=date_from)
     if date_to:
         qs = qs.filter(created_at__date__lte=date_to)
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        if search.isdigit():
+            qs = qs.filter(Q(remarks__icontains=search) | Q(id=int(search)))
+        else:
+            qs = qs.filter(Q(remarks__icontains=search))
     tx_type = request.GET.get('type')
     if tx_type == 'in':
         qs = qs.filter(transaction_type='in')
@@ -41,18 +48,21 @@ def super_admin_transaction_list(request):
     total_amount = qs.aggregate(s=Sum('amount'))['s'] or Decimal('0')
     revenue = qs.filter(transaction_type='in').aggregate(s=Sum('amount'))['s'] or Decimal('0')
     pending = qs.filter(payment_status='pending').aggregate(s=Sum('amount'))['s'] or Decimal('0')
+    total_count = qs.count()
     success = qs.filter(payment_status='success').count()
-    failed = qs.count() - success
+    failed = total_count - success
     stats = {
         'total': str(total_amount),
         'revenue': str(revenue),
         'pending': str(pending),
         'success_count': success,
         'failed_count': failed,
+        'total_count': total_count,
     }
     by_cat = list(qs.values('category').annotate(total=Sum('amount')).values('category', 'total'))
     for x in by_cat:
         x['total'] = str(x['total'] or 0)
     stats['by_category'] = by_cat
-    results = [_tx_to_dict(t) for t in qs.order_by('-created_at')[:100]]
-    return JsonResponse({'stats': stats, 'results': results})
+    qs_paged, pagination = paginate_queryset(qs, request)
+    results = [_tx_to_dict(t) for t in qs_paged]
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})

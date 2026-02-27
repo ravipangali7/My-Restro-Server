@@ -10,8 +10,10 @@ from django.db.models.functions import TruncDate
 from django.utils import timezone
 from datetime import timedelta
 
+from django.db.models import Q
+
 from core.models import QrStandOrder, Restaurant, Transaction, TransactionCategory, SuperSetting, PaymentStatus
-from core.utils import auth_required
+from core.utils import auth_required, paginate_queryset
 
 
 def _require_super_admin(request):
@@ -40,16 +42,19 @@ def super_admin_qr_order_list(request):
     err = _require_super_admin(request)
     if err:
         return err
-    qs = QrStandOrder.objects.all().select_related('restaurant')
+    qs = QrStandOrder.objects.all().select_related('restaurant').order_by('-created_at')
     restaurant_id = request.GET.get('restaurant_id')
     if restaurant_id:
         qs = qs.filter(restaurant_id=restaurant_id)
-    date_from = request.GET.get('date_from')
-    date_to = request.GET.get('date_to')
+    date_from = request.GET.get('date_from') or request.GET.get('start_date')
+    date_to = request.GET.get('date_to') or request.GET.get('end_date')
     if date_from:
         qs = qs.filter(created_at__date__gte=date_from)
     if date_to:
         qs = qs.filter(created_at__date__lte=date_to)
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(restaurant__name__icontains=search) | Q(restaurant__slug__icontains=search))
     total_orders = qs.count()
     pending = qs.filter(status='pending').count()
     accepted = qs.filter(status='accepted').count()
@@ -90,10 +95,12 @@ def super_admin_qr_order_list(request):
         {'name': row['day'].isoformat() if row.get('day') else '', 'value': float(row.get('value') or 0)}
         for row in daily_qs
     ]
-    results = [_qr_order_to_dict(q) for q in qs.order_by('-created_at')[:100]]
+    qs_paged, pagination = paginate_queryset(qs, request)
+    results = [_qr_order_to_dict(q) for q in qs_paged]
     return JsonResponse({
         'stats': stats,
         'results': results,
+        'pagination': pagination,
         'transaction_breakdown': transaction_breakdown,
         'revenue_time_series': revenue_time_series,
     })

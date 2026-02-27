@@ -4,10 +4,10 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
-from django.db.models import Q
+from django.db.models import Q, Count
 from django.contrib.auth import get_user_model
 
-from core.utils import auth_required
+from core.utils import auth_required, paginate_queryset, parse_date
 
 User = get_user_model()
 
@@ -29,17 +29,26 @@ def _user_kyc_to_dict(u):
 
 @require_http_methods(['GET'])
 def super_admin_kyc_list(request):
-    qs = User.objects.filter(is_owner=True).order_by('-date_joined')
+    qs = User.objects.filter(is_owner=True).order_by('-created_at')
     search = request.GET.get('search', '').strip()
     if search:
         qs = qs.filter(Q(phone__icontains=search) | Q(name__icontains=search))
-    total = qs.count()
-    pending = qs.filter(kyc_status='pending').count()
-    approved = qs.filter(kyc_status='approved').count()
-    rejected = qs.filter(kyc_status='rejected').count()
-    stats = {'total': total, 'pending': pending, 'approved': approved, 'rejected': rejected}
-    results = [_user_kyc_to_dict(u) for u in qs[:100]]
-    return JsonResponse({'stats': stats, 'results': results})
+    start_date = parse_date(request.GET.get('start_date'))
+    end_date = parse_date(request.GET.get('end_date'))
+    if start_date:
+        qs = qs.filter(created_at__date__gte=start_date)
+    if end_date:
+        qs = qs.filter(created_at__date__lte=end_date)
+    agg = User.objects.filter(is_owner=True).aggregate(
+        total=Count('id'),
+        pending=Count('id', filter=Q(kyc_status='pending')),
+        approved=Count('id', filter=Q(kyc_status='approved')),
+        rejected=Count('id', filter=Q(kyc_status='rejected')),
+    )
+    stats = {'total': agg.get('total') or 0, 'pending': agg.get('pending') or 0, 'approved': agg.get('approved') or 0, 'rejected': agg.get('rejected') or 0}
+    qs_paged, pagination = paginate_queryset(qs, request)
+    results = [_user_kyc_to_dict(u) for u in qs_paged]
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})
 
 
 @csrf_exempt

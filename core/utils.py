@@ -272,3 +272,36 @@ def get_customer_id_from_request(request):
     """
     customer = getattr(request, 'customer', None)
     return customer.id if customer else None
+
+
+def parse_date(value):
+    """Parse YYYY-MM-DD string to date or None."""
+    if not value:
+        return None
+    s = str(value).strip()[:10]
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        return None
+
+
+def paginate_queryset(qs, request, default_page_size=20, max_page_size=100):
+    """
+    Apply pagination to a queryset from GET params page, page_size.
+    Returns (sliced_queryset, pagination_dict).
+    pagination_dict: {'page': int, 'page_size': int, 'total_count': int}
+    """
+    page = max(1, int(request.GET.get('page', 1)))
+    try:
+        page_size = max(1, min(max_page_size, int(request.GET.get('page_size', default_page_size))))
+    except (TypeError, ValueError):
+        page_size = default_page_size
+    total = qs.count()
+    start = (page - 1) * page_size
+    return qs[start : start + page_size], {
+        'page': page,
+        'page_size': page_size,
+        'total_count': total,
+    }

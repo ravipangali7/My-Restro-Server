@@ -5,10 +5,10 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
-from django.db.models import Sum
+from django.db.models import Sum, Q, Count
 
 from core.models import ShareholderWithdrawal, User, Transaction, TransactionCategory, SuperSetting
-from core.utils import auth_required
+from core.utils import auth_required, paginate_queryset
 
 
 def _require_super_admin(request):
@@ -69,29 +69,37 @@ def super_admin_withdrawal_list(request):
     err = _require_super_admin(request)
     if err:
         return err
-    qs = ShareholderWithdrawal.objects.all().select_related('user')
-    date_from = request.GET.get('date_from')
-    date_to = request.GET.get('date_to')
+    qs = ShareholderWithdrawal.objects.all().select_related('user').order_by('-created_at')
+    date_from = request.GET.get('date_from') or request.GET.get('start_date')
+    date_to = request.GET.get('date_to') or request.GET.get('end_date')
     if date_from:
         qs = qs.filter(created_at__date__gte=date_from)
     if date_to:
         qs = qs.filter(created_at__date__lte=date_to)
-    total = qs.count()
-    pending = qs.filter(status='pending').count()
-    approved = qs.filter(status='approved').count()
-    rejected = qs.filter(status='reject').count()
-    total_amount = qs.aggregate(s=Sum('amount'))['s'] or Decimal('0')
-    pending_amount = qs.filter(status='pending').aggregate(s=Sum('amount'))['s'] or Decimal('0')
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        qs = qs.filter(
+            Q(user__name__icontains=search) | Q(user__phone__icontains=search) | Q(user__username__icontains=search)
+        )
+    agg = ShareholderWithdrawal.objects.aggregate(
+        total=Count('id'),
+        pending=Count('id', filter=Q(status='pending')),
+        approved=Count('id', filter=Q(status='approved')),
+        rejected=Count('id', filter=Q(status='reject')),
+        total_amount=Sum('amount'),
+        pending_amount=Sum('amount', filter=Q(status='pending')),
+    )
     stats = {
-        'total': total,
-        'pending': pending,
-        'approved': approved,
-        'rejected': rejected,
-        'total_amount': str(total_amount),
-        'pending_amount': str(pending_amount),
+        'total': agg.get('total') or 0,
+        'pending': agg.get('pending') or 0,
+        'approved': agg.get('approved') or 0,
+        'rejected': agg.get('rejected') or 0,
+        'total_amount': str(agg.get('total_amount') or Decimal('0')),
+        'pending_amount': str(agg.get('pending_amount') or Decimal('0')),
     }
-    results = [_withdrawal_to_dict(w) for w in qs.order_by('-created_at')[:100]]
-    return JsonResponse({'stats': stats, 'results': results})
+    qs_paged, pagination = paginate_queryset(qs, request)
+    results = [_withdrawal_to_dict(w) for w in qs_paged]
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})
 
 
 @auth_required
@@ -100,7 +108,7 @@ def super_admin_withdrawal_detail(request, pk):
     err = _require_super_admin(request)
     if err:
         return err
-    w = get_object_or_404(ShareholderWithdrawal, pk=pk)
+    w = get_object_or_404(ShareholderWithdrawal.objects.select_related('user'), pk=pk)
     data = _withdrawal_to_dict(w)
     data['user_balance_current'] = str(getattr(w.user, 'balance', Decimal('0')) or Decimal('0'))
     related = (
@@ -182,7 +190,7 @@ def super_admin_withdrawal_update(request, pk):
     err = _require_super_admin(request)
     if err:
         return err
-    w = get_object_or_404(ShareholderWithdrawal, pk=pk)
+    w = get_object_or_404(ShareholderWithdrawal.objects.select_related('user'), pk=pk)
     try:
         body = json.loads(request.body) if request.body else {}
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
@@ -216,7 +224,7 @@ def super_admin_withdrawal_delete(request, pk):
     err = _require_super_admin(request)
     if err:
         return err
-    w = get_object_or_404(ShareholderWithdrawal, pk=pk)
+    w = get_object_or_404(ShareholderWithdrawal.objects.select_related('user'), pk=pk)
     w.delete()
     return JsonResponse({'success': True})
 
@@ -225,7 +233,7 @@ def super_admin_withdrawal_delete(request, pk):
 @auth_required
 @require_http_methods(['PATCH', 'PUT'])
 def super_admin_withdrawal_approve_reject(request, pk):
-    w = get_object_or_404(ShareholderWithdrawal, pk=pk)
+    w = get_object_or_404(ShareholderWithdrawal.objects.select_related('user'), pk=pk)
     try:
         body = json.loads(request.body) if request.body else {}
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError):

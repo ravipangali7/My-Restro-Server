@@ -5,15 +5,15 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
-from django.db.models import Sum, Q, Count
-from django.db.models.functions import TruncDate, TruncMonth
+from django.db.models import Sum, Q, Count, Value
+from django.db.models.functions import TruncDate, TruncMonth, Coalesce
 
 from core.models import (
     Restaurant, User, Order, OrderItem, Vendor, Transaction, Staff, OrderStatus,
     PaidRecord, ReceivedRecord, Purchase, Expenses, StockLog, Attendance,
     TransactionCategory, SuperSetting, PaymentStatus,
 )
-from core.utils import auth_required, image_url_for_request, get_restaurant_subscription_status
+from core.utils import auth_required, image_url_for_request, get_restaurant_subscription_status, paginate_queryset, parse_date
 from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 
 
@@ -193,48 +193,67 @@ def super_admin_restaurant_check_slug(request):
 
 @require_http_methods(['GET'])
 def super_admin_restaurant_list(request):
-    """List all restaurants with stats. Filter by search/date."""
+    """List all restaurants with stats. Filter by search/date. Paginated."""
     qs = Restaurant.objects.all().select_related('user')
     search = request.GET.get('search', '').strip()
     if search:
         qs = qs.filter(
             Q(name__icontains=search) | Q(slug__icontains=search) | Q(phone__icontains=search)
         )
-    date_from = request.GET.get('date_from')
-    date_to = request.GET.get('date_to')
+    date_from = parse_date(request.GET.get('date_from') or request.GET.get('start_date'))
+    date_to = parse_date(request.GET.get('date_to') or request.GET.get('end_date'))
     if date_from:
         qs = qs.filter(created_at__date__gte=date_from)
     if date_to:
         qs = qs.filter(created_at__date__lte=date_to)
+    qs = qs.order_by('-created_at').select_related('user').annotate(
+        _revenue=Coalesce(Sum('orders__total', filter=~Q(orders__status=OrderStatus.REJECTED)), Value(Decimal('0'))),
+        _order_count=Count('orders', distinct=True),
+        _staff_count=Count('staffs', distinct=True),
+    )
     total = qs.count()
-    active = qs.filter(is_open=True).count()
-    inactive = qs.filter(is_open=False).count()
+    active = Restaurant.objects.filter(is_open=True).count()
+    inactive = total - active
+    from django.utils import timezone
+    today = timezone.now().date()
+    try:
+        subscription_active = Restaurant.objects.filter(is_restaurant=True).filter(
+            Q(subscription_end__gte=today) | Q(subscription_end__isnull=True)
+        ).count()
+    except Exception:
+        subscription_active = Restaurant.objects.filter(subscription_end__gte=today).count()
+    total_balance = Restaurant.objects.aggregate(s=Sum('balance'))['s'] or Decimal('0')
+    total_due = Restaurant.objects.aggregate(s=Sum('due_balance'))['s'] or Decimal('0')
+    try:
+        ss = SuperSetting.objects.first()
+        system_balance = ss.balance if ss else Decimal('0')
+    except Exception:
+        system_balance = Decimal('0')
     kyc_pending = User.objects.filter(is_owner=True, kyc_status='pending').count()
-    subscription_earnings = 0
-    total_due = qs.aggregate(s=Sum('due_balance'))['s'] or Decimal('0')
-    due_blocked = 0
     stats = {
         'total': total,
         'active': active,
         'inactive': inactive,
         'kyc_pending': kyc_pending,
-        'subscription_earnings': str(subscription_earnings),
-        'total_due': str(total_due),
-        'due_blocked': due_blocked,
+        'subscription_active': subscription_active,
+        'total_restaurants': total,
+        'active_restaurants': active,
+        'total_system_balance': str(system_balance),
+        'total_due_balance': str(total_due),
+        'total_balance': str(total_balance),
+        'due_blocked': 0,
     }
+    qs_paged, pagination = paginate_queryset(qs, request)
     results = []
-    for r in qs.order_by('name')[:100]:
-        rev = Order.objects.filter(restaurant=r).exclude(status='rejected').aggregate(s=Sum('total'))['s'] or Decimal('0')
-        order_count = Order.objects.filter(restaurant=r).count()
-        staff_count = r.staffs.count()
+    for r in qs_paged:
         owner_name = getattr(r.user, 'name', '') or getattr(r.user, 'username', '') if r.user else ''
         results.append(_restaurant_to_dict(r, {
-            'revenue': str(rev),
-            'order_count': order_count,
-            'staff_count': staff_count,
+            'revenue': str(getattr(r, '_revenue', None) or Decimal('0')),
+            'order_count': getattr(r, '_order_count', 0) or 0,
+            'staff_count': getattr(r, '_staff_count', 0) or 0,
             'owner_name': owner_name,
         }, request=request))
-    return JsonResponse({'stats': stats, 'results': results})
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})
 
 
 @require_http_methods(['GET'])
