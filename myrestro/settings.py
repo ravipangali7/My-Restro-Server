@@ -48,9 +48,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'corsheaders.middleware.CorsMiddleware',  # As high as possible so CORS headers are on every response (including OPTIONS and errors)
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
     'myrestro.middleware.CsrfExemptApiMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -70,14 +70,16 @@ REST_FRAMEWORK = {
 }
 
 # CORS: allow frontend origins (credentials require explicit origins, not *)
+# Set CORS_ALLOWED_ORIGINS env as comma-separated list to override in production (e.g. "https://restrohub.sewabyapar.com,https://app.example.com")
 CORS_ALLOW_ALL_ORIGINS = False
-CORS_ALLOWED_ORIGINS = [
+_default_cors_origins = [
     "https://restrohub.sewabyapar.com",
     "http://localhost:8080",
     "http://127.0.0.1:8080",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
+CORS_ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()] or _default_cors_origins
 CORS_ALLOW_CREDENTIALS = True
 
 # Allow frontend origins for CSRF
