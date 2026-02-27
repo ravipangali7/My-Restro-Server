@@ -49,6 +49,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'corsheaders.middleware.CorsMiddleware',  # As high as possible so CORS headers are on every response (including OPTIONS and errors)
+    'myrestro.middleware.CorsFallbackMiddleware',  # Fallback: add CORS headers if response does not have them (e.g. proxy/deployment quirks)
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'myrestro.middleware.CsrfExemptApiMiddleware',
@@ -81,6 +82,17 @@ _default_cors_origins = [
 ]
 CORS_ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()] or _default_cors_origins
 CORS_ALLOW_CREDENTIALS = True
+# Explicitly allow common headers so preflight (OPTIONS) always succeeds
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "accept-encoding",
+    "authorization",
+    "content-type",
+    "origin",
+    "user-agent",
+    "x-csrftoken",
+    "x-requested-with",
+]
 
 # Allow frontend origins for CSRF
 CSRF_TRUSTED_ORIGINS = [
