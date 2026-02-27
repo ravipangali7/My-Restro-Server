@@ -3,7 +3,7 @@ from django.urls import path
 from core.utils import auth_required
 from core.permissions import manager_required, manager_unlocked
 from core.views.manager.dashboard_views import manager_dashboard
-from core.views.manager.attendance_views import manager_attendance_list, manager_attendance_set, manager_attendance_summary
+from core.views.manager.attendance_views import manager_attendance_list, manager_attendance_set, manager_attendance_summary, manager_attendance_delete
 from core.views.manager.notification_views import manager_notification_list, manager_notification_create
 from core.views.in_app_notification_views import (
     in_app_notification_list_staff,
@@ -52,6 +52,7 @@ urlpatterns = [
     path('attendance/', _manager_view(manager_attendance_list)),
     path('attendance/summary/', _manager_view(manager_attendance_summary)),
     path('attendance/set/', _manager_view(manager_attendance_set)),
+    path('attendance/<int:id>/delete/', _manager_view(manager_attendance_delete)),
     path('notifications/', _manager_view(manager_notification_list)),
     path('notifications/create/', _manager_view(manager_notification_create)),
     path('in-app-notifications/', _manager_view(in_app_notification_list_staff)),

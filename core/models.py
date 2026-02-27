@@ -76,6 +76,11 @@ class AttendanceStatus(models.TextChoices):
     LEAVE = 'leave', 'Leave'
 
 
+class SalaryType(models.TextChoices):
+    PER_DAY = 'per_day', 'Per Day'
+    MONTHLY = 'monthly', 'Monthly'
+
+
 class QrStandOrderStatus(models.TextChoices):
     PENDING = 'pending', 'Pending'
     ACCEPTED = 'accepted', 'Accepted'
@@ -518,6 +523,9 @@ class Staff(models.Model):
     )
     per_day_salary = models.DecimalField(
         max_digits=12, decimal_places=2, default=Decimal('0'), null=True, blank=True
+    )
+    salary_type = models.CharField(
+        max_length=20, choices=SalaryType.choices, default=SalaryType.PER_DAY
     )
     is_suspend = models.BooleanField(default=False)
     to_pay = models.DecimalField(
@@ -1034,6 +1042,10 @@ class Attendance(models.Model):
         max_length=20, choices=AttendanceStatus.choices
     )
     leave_reason = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='attendance_records_created'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

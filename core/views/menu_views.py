@@ -29,7 +29,7 @@ MANAGER_PATHS = [
     '/finance-records', '/pl-report', '/transaction-history', '/notifications', '/analytics', '/restaurants', '/settings',
 ]
 WAITER_PATHS = [
-    '/dashboard', '/restaurants', '/qr', '/tables', '/order-menu', '/new-orders', '/orders', '/qr-orders', '/transaction-history', '/call-waiter', '/feedback', '/settings',
+    '/dashboard', '/restaurants', '/qr', '/tables', '/order-menu', '/new-orders', '/orders', '/qr-orders', '/transaction-history', '/call-waiter', '/attendance', '/feedback', '/settings',
 ]
 KITCHEN_PATHS = ['/dashboard', '/kitchen-dashboard']
 CUSTOMER_PATHS = [
