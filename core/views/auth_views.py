@@ -60,6 +60,9 @@ def login(request):
     Unified login: POST JSON { "phone", "password", "country_code" (required), optional "account_type" }.
     account_type: "customer" = try only Customer; "staff" or "user" = try only User; else try Customer first then User.
     Returns { "token", "user" } or { "token", "customer" } or 401.
+
+    Deployment: Ensure the reverse proxy (nginx, Cloudflare, etc.) does NOT require authentication
+    for this path. If the proxy returns 401 for unauthenticated requests, login will always fail.
     """
     try:
         body = json.loads(request.body) if request.body else {}
