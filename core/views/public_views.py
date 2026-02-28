@@ -1,4 +1,4 @@
-"""Public API (no auth): restaurant and menu by slug for QR menu; call waiter; public feedback."""
+"""Public API (no auth): restaurant and menu by slug for QR menu; public feedback."""
 import io
 import json
 import qrcode
@@ -7,12 +7,9 @@ from django.http import HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
-from django.utils import timezone
-from django.db.models import F, OuterRef, Subquery
 
 from core.models import (
     Restaurant, Category, Product, Staff, Attendance, Order, Feedback,
-    WaiterCall, WaiterCallStatus, Table,
 )
 from core.fcm import send_fcm_to_token
 from core.constants import normalize_country_code
@@ -156,92 +153,6 @@ def public_restaurant_menu(request, slug):
         'categories': categories,
         'products': products,
     })
-
-
-@csrf_exempt
-@require_http_methods(['POST'])
-def public_call_waiter(request, slug):
-    """
-    POST /api/public/restaurant/<slug>/call-waiter/
-    Body: optional table_id, table_number, message.
-    Assigns to least recently active waiter present today; sends FCM to that waiter.
-    """
-    r = get_object_or_404(Restaurant, slug=slug)
-    if not getattr(r, 'is_restaurant', True):
-        return JsonResponse({'ok': False, 'detail': 'Restaurant is inactive'}, status=403)
-    try:
-        body = json.loads(request.body) if request.body else {}
-    except json.JSONDecodeError:
-        body = {}
-    table_number = (body.get('table_number') or '').strip() or None
-    table_id = body.get('table_id')
-    table_obj = None
-    if table_id is not None:
-        try:
-            table_id = int(table_id)
-        except (TypeError, ValueError):
-            table_id = None
-    if table_id is not None:
-        table_obj = Table.objects.filter(pk=table_id, restaurant=r).first()
-        if not table_obj:
-            table_id = None
-        else:
-            if not table_number and table_obj.name:
-                table_number = table_obj.name
-    customer_name = (body.get('customer_name') or '').strip() or ''
-    message = (body.get('message') or '').strip() or 'Customer is calling for assistance.'
-
-    today = timezone.now().date()
-    # Present waiters today: Staff with is_waiter=True and Attendance for today with status=present
-    present_staff_ids = list(
-        Attendance.objects.filter(
-            restaurant=r,
-            date=today,
-            status='present',
-            staff__is_waiter=True,
-        ).values_list('staff_id', flat=True).distinct()
-    )
-    if not present_staff_ids:
-        # Fallback: all waiters of the restaurant (no attendance filter)
-        present_staff_ids = list(
-            Staff.objects.filter(restaurant=r, is_waiter=True).values_list('id', flat=True)
-        )
-    if not present_staff_ids:
-        return JsonResponse({'ok': False, 'detail': 'No waiter available'}, status=503)
-
-    # Least recently active: staff with oldest last Order.updated_at (nulls first = no orders yet)
-    last_order_subq = Order.objects.filter(waiter_id=OuterRef('pk')).order_by('-updated_at')
-    staff_with_last = Staff.objects.filter(
-        id__in=present_staff_ids,
-    ).annotate(
-        last_order_at=Subquery(last_order_subq.values('updated_at')[:1]),
-    ).order_by(F('last_order_at').asc(nulls_first=True))
-    assigned_staff = staff_with_last.select_related('user').first()
-    if not assigned_staff:
-        return JsonResponse({'ok': False, 'detail': 'No waiter available'}, status=503)
-
-    WaiterCall.objects.create(
-        restaurant=r,
-        table=table_obj,
-        table_number=table_number or '',
-        customer_name=customer_name,
-        message=message,
-        status=WaiterCallStatus.PENDING,
-        assigned_to=assigned_staff,
-    )
-
-    title = 'Call Waiter'
-    body_text = message
-    if table_number:
-        body_text = f'Table {table_number}: {body_text}'
-    data = {'restaurant_slug': r.slug, 'restaurant_name': r.name}
-    if table_number:
-        data['table_number'] = table_number
-    user = assigned_staff.user
-    fcm_token = getattr(user, 'fcm_token', None) or ''
-    if fcm_token:
-        send_fcm_to_token(fcm_token, title, body_text, data=data)
-    return JsonResponse({'ok': True, 'assigned': True})
 
 
 @csrf_exempt

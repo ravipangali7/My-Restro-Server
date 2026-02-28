@@ -110,11 +110,6 @@ from core.views.owner.reports_views import owner_reports
 from core.views.owner.qr_order_views import owner_qr_order_list, owner_qr_order_create
 from core.views.owner.settings_views import owner_settings
 from core.views.transaction_history_views import owner_transaction_history
-from core.views.in_app_notification_views import (
-    in_app_notification_list_staff,
-    in_app_notification_create,
-    in_app_notification_recipients,
-)
 
 
 def _owner_access(view_func):
@@ -223,7 +218,4 @@ urlpatterns = [
     path('feedback/', _owner_access_when_locked(owner_feedback_list)),
     path('stock-logs/', _owner_access_when_locked(owner_stock_log_list)),
     path('transaction-history/', _owner_access_when_locked(owner_transaction_history)),
-    path('in-app-notifications/', _owner_access_when_locked(in_app_notification_list_staff)),
-    path('in-app-notifications/send/', _owner_access_when_locked(in_app_notification_create)),
-    path('in-app-notifications/recipients/', _owner_access_when_locked(in_app_notification_recipients)),
 ]

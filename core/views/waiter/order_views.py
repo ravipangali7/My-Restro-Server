@@ -8,7 +8,7 @@ from django.shortcuts import get_object_or_404
 
 from django.db.models import Q
 
-from core.models import Order, OrderItem, OrderStatus, OrderType, PaymentStatus, Customer, Delivery
+from core.models import Order, OrderItem, OrderStatus, OrderType, PaymentStatus, Customer
 from core.payment_qr import generate_esewa_qr_png
 from core.utils import get_waiter_staff_id, paginate_queryset, parse_date
 from core.permissions import get_waiter_restaurant
@@ -193,17 +193,6 @@ def waiter_order_update(request, pk):
                 status=400,
             )
         o.status = new_status
-        if o.status == OrderStatus.ACCEPTED and o.order_type == OrderType.DELIVERY:
-            Delivery.objects.get_or_create(
-                order=o,
-                defaults={
-                    'delivery_status': 'accepted',
-                    'pickup_lat': o.restaurant.latitude if getattr(o.restaurant, 'latitude', None) else None,
-                    'pickup_lon': o.restaurant.longitude if getattr(o.restaurant, 'longitude', None) else None,
-                    'delivery_lat': o.delivery_lat,
-                    'delivery_lon': o.delivery_lon,
-                }
-            )
     if 'payment_status' in body:
         o.payment_status = body['payment_status']
     if 'transaction_reference' in body:

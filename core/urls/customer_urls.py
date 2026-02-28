@@ -14,7 +14,6 @@ from core.views.customer.feedback_views import customer_feedback_list
 from core.views.customer.profile_views import customer_profile_get, customer_profile_update
 from core.views.customer.pending_payments_views import customer_pending_payments
 from core.views.transaction_history_views import customer_transaction_history
-from core.views.in_app_notification_views import in_app_notification_list_customer
 
 urlpatterns = [
     path('auth/register/', customer_register),
@@ -31,5 +30,4 @@ urlpatterns = [
     path('profile/update/', customer_profile_update),
     path('pending-payments/', customer_pending_payments),
     path('transaction-history/', customer_auth_required(customer_transaction_history)),
-    path('in-app-notifications/', in_app_notification_list_customer),
 ]

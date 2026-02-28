@@ -31,7 +31,6 @@ class KycStatus(models.TextChoices):
 class OrderType(models.TextChoices):
     TABLE = 'table', 'Table'
     PACKING = 'packing', 'Packing'
-    DELIVERY = 'delivery', 'Delivery'
 
 
 class OrderStatus(models.TextChoices):
@@ -97,26 +96,6 @@ class WithdrawalStatus(models.TextChoices):
 class BulkNotificationType(models.TextChoices):
     SMS = 'sms', 'SMS'
     WHATSAPP = 'whatsapp', 'WhatsApp'
-
-
-class WaiterCallStatus(models.TextChoices):
-    PENDING = 'pending', 'Pending'
-    COMPLETED = 'completed', 'Completed'
-
-
-class DeliveryStatus(models.TextChoices):
-    ACCEPTED = 'accepted', 'Accepted'
-    RIDER_ASSIGNED = 'rider_assigned', 'Rider Assigned'
-    RIDER_PICKED_UP = 'rider_picked_up', 'Rider Picked Up'
-    ON_THE_WAY = 'on_the_way', 'On The Way'
-    DELIVERED = 'delivered', 'Delivered'
-    RETURNED = 'returned', 'Returned'
-
-
-class RiderSource(models.TextChoices):
-    IN_HOUSE = 'in_house', 'In House'
-    PATHAO = 'pathao', 'Pathao'
-    YANGO = 'yango', 'Yango'
 
 
 # --- Models ---
@@ -572,14 +551,6 @@ class Order(models.Model):
         max_length=20, choices=OrderType.choices, default=OrderType.TABLE
     )
     address = models.TextField(blank=True, null=True)
-    delivery_lat = models.DecimalField(
-        max_digits=10, decimal_places=7, null=True, blank=True,
-        help_text='Customer delivery location latitude'
-    )
-    delivery_lon = models.DecimalField(
-        max_digits=10, decimal_places=7, null=True, blank=True,
-        help_text='Customer delivery location longitude'
-    )
     status = models.CharField(
         max_length=20, choices=OrderStatus.choices, default=OrderStatus.PENDING
     )
@@ -649,98 +620,6 @@ class OrderItem(models.Model):
         return f'OrderItem #{self.id} (Order #{self.order_id})'
 
 
-class Rider(models.Model):
-    """In-house or third-party rider for delivery. Can be linked to User or standalone."""
-    name = models.CharField(max_length=255)
-    phone = models.CharField(max_length=20)
-    user = models.ForeignKey(
-        User,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='rider_deliveries'
-    )
-    is_available = models.BooleanField(default=True)
-    last_lat = models.DecimalField(
-        max_digits=10, decimal_places=7, null=True, blank=True
-    )
-    last_lon = models.DecimalField(
-        max_digits=10, decimal_places=7, null=True, blank=True
-    )
-    last_updated = models.DateTimeField(null=True, blank=True)
-    source = models.CharField(
-        max_length=20,
-        choices=RiderSource.choices,
-        default=RiderSource.IN_HOUSE
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = 'core_rider'
-        ordering = ['name']
-
-    def __str__(self):
-        return f'{self.name} ({self.phone})'
-
-
-class Delivery(models.Model):
-    """One-to-one with Order for delivery orders. Tracks rider, location, ETA."""
-    order = models.OneToOneField(
-        Order,
-        on_delete=models.CASCADE,
-        related_name='delivery',
-        primary_key=True
-    )
-    rider = models.ForeignKey(
-        Rider,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='deliveries'
-    )
-    delivery_status = models.CharField(
-        max_length=20,
-        choices=DeliveryStatus.choices,
-        default=DeliveryStatus.ACCEPTED
-    )
-    pickup_lat = models.DecimalField(
-        max_digits=10, decimal_places=7, null=True, blank=True
-    )
-    pickup_lon = models.DecimalField(
-        max_digits=10, decimal_places=7, null=True, blank=True
-    )
-    delivery_lat = models.DecimalField(
-        max_digits=10, decimal_places=7, null=True, blank=True
-    )
-    delivery_lon = models.DecimalField(
-        max_digits=10, decimal_places=7, null=True, blank=True
-    )
-    rider_lat = models.DecimalField(
-        max_digits=10, decimal_places=7, null=True, blank=True
-    )
-    rider_lon = models.DecimalField(
-        max_digits=10, decimal_places=7, null=True, blank=True
-    )
-    assigned_at = models.DateTimeField(null=True, blank=True)
-    picked_up_at = models.DateTimeField(null=True, blank=True)
-    delivered_at = models.DateTimeField(null=True, blank=True)
-    distance_km = models.DecimalField(
-        max_digits=8, decimal_places=2, null=True, blank=True
-    )
-    eta_minutes = models.PositiveIntegerField(null=True, blank=True)
-    third_party_request_id = models.CharField(max_length=255, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = 'core_delivery'
-        verbose_name_plural = 'Deliveries'
-
-    def __str__(self):
-        return f'Delivery for Order #{self.order_id}'
-
-
 class Feedback(models.Model):
     restaurant = models.ForeignKey(
         Restaurant, on_delete=models.CASCADE, related_name='feedbacks'
@@ -767,36 +646,6 @@ class Feedback(models.Model):
 
     def __str__(self):
         return f'Feedback #{self.id} ({self.rating})'
-
-
-class WaiterCall(models.Model):
-    restaurant = models.ForeignKey(
-        Restaurant, on_delete=models.CASCADE, related_name='waiter_calls'
-    )
-    table = models.ForeignKey(
-        Table, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='waiter_calls'
-    )
-    table_number = models.CharField(max_length=64, blank=True)
-    customer_name = models.CharField(max_length=255, blank=True)
-    message = models.TextField(blank=True)
-    status = models.CharField(
-        max_length=20, choices=WaiterCallStatus.choices,
-        default=WaiterCallStatus.PENDING
-    )
-    assigned_to = models.ForeignKey(
-        Staff, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='waiter_calls'
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = 'core_waiter_call'
-        ordering = ['-created_at']
-
-    def __str__(self):
-        return f'WaiterCall #{self.id} ({self.restaurant.name})'
 
 
 class Purchase(models.Model):
@@ -1168,50 +1017,3 @@ class BulkNotification(models.Model):
 
     def __str__(self):
         return f'BulkNotification #{self.id} ({self.type})'
-
-
-class InAppNotification(models.Model):
-    """In-app notification: one sender, one recipient (user or customer)."""
-    sender = models.ForeignKey(
-        'User', on_delete=models.CASCADE, related_name='sent_in_app_notifications'
-    )
-    recipient_user = models.ForeignKey(
-        'User', on_delete=models.CASCADE, related_name='received_in_app_notifications',
-        null=True, blank=True
-    )
-    recipient_customer = models.ForeignKey(
-        Customer, on_delete=models.CASCADE, related_name='received_in_app_notifications',
-        null=True, blank=True
-    )
-    purpose = models.TextField()
-    created_at = models.DateTimeField(auto_now_add=True)
-    read_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        db_table = 'core_in_app_notification'
-        ordering = ['-created_at']
-
-    def __str__(self):
-        return f'InAppNotification #{self.id} from {self.sender_id}'
-
-    def clean(self):
-        from django.core.exceptions import ValidationError
-        if bool(self.recipient_user) == bool(self.recipient_customer):
-            raise ValidationError('Exactly one of recipient_user or recipient_customer must be set.')
-
-
-class HelpSupportEntry(models.Model):
-    """FAQ / Help & Support content. Ordered entries shown on Help page."""
-    title = models.CharField(max_length=255)
-    content = models.TextField(blank=True)
-    order = models.PositiveIntegerField(default=0)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = 'core_help_support_entry'
-        ordering = ['order', 'id']
-
-    def __str__(self):
-        return self.title

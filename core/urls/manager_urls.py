@@ -5,11 +5,6 @@ from core.permissions import manager_required, manager_unlocked
 from core.views.manager.dashboard_views import manager_dashboard
 from core.views.manager.attendance_views import manager_attendance_list, manager_attendance_set, manager_attendance_summary, manager_attendance_delete
 from core.views.manager.notification_views import manager_notification_list, manager_notification_create
-from core.views.in_app_notification_views import (
-    in_app_notification_list_staff,
-    in_app_notification_create,
-    in_app_notification_recipients,
-)
 from core.views.owner.order_views import owner_order_list, owner_order_detail, owner_order_create, owner_order_update, owner_order_payment_qr, owner_order_bill
 from core.views.owner.table_views import owner_table_list, owner_table_create, owner_table_update, owner_table_delete
 from core.views.owner.restaurant_views import owner_restaurant_list, owner_restaurant_detail, owner_restaurant_update
@@ -55,9 +50,6 @@ urlpatterns = [
     path('attendance/<int:id>/delete/', _manager_view(manager_attendance_delete)),
     path('notifications/', _manager_view(manager_notification_list)),
     path('notifications/create/', _manager_view(manager_notification_create)),
-    path('in-app-notifications/', _manager_view(in_app_notification_list_staff)),
-    path('in-app-notifications/send/', _manager_view(in_app_notification_create)),
-    path('in-app-notifications/recipients/', _manager_view(in_app_notification_recipients)),
     path('orders/', _manager_view(owner_order_list)),
     path('orders/create/', _manager_view(owner_order_create)),
     path('orders/<int:pk>/', _manager_view(owner_order_detail)),

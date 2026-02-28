@@ -13,7 +13,7 @@ from core.permissions import kitchen_required
 
 def _kitchen_order_to_dict(o):
     """Serialize order for kitchen dashboard: id, table/delivery, items with image, notes, total, created_at, status."""
-    table_display = 'Delivery' if o.order_type == 'delivery' else (o.table.name if o.table else (o.table_number or '—'))
+    table_display = o.table.name if o.table else (o.table_number or (o.address or '—'))
     items = []
     for i in o.items.select_related('product', 'combo_set').all():
         name = None

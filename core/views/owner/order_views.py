@@ -7,7 +7,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
 from django.db.models import Sum, Count, Q
 
-from core.models import Order, OrderItem, Restaurant, OrderStatus, OrderType, PaymentStatus, Customer, Delivery, OrderType, Delivery, DeliveryStatus
+from core.models import Order, OrderItem, Restaurant, OrderStatus, OrderType, PaymentStatus, Customer
 from core.utils import get_restaurant_ids, auth_required, paginate_queryset, parse_date
 from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 from core.invoice_utils import get_invoice_extras
@@ -263,18 +263,6 @@ def owner_order_update(request, pk):
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
     if 'status' in body:
         o.status = body['status']
-        # Create Delivery when order is accepted and is delivery type
-        if o.status == OrderStatus.ACCEPTED and o.order_type == OrderType.DELIVERY:
-            Delivery.objects.get_or_create(
-                order=o,
-                defaults={
-                    'delivery_status': 'accepted',
-                    'pickup_lat': o.restaurant.latitude,
-                    'pickup_lon': o.restaurant.longitude,
-                    'delivery_lat': o.delivery_lat,
-                    'delivery_lon': o.delivery_lon,
-                }
-            )
     if 'payment_status' in body:
         o.payment_status = body['payment_status']
     if 'payment_method' in body:

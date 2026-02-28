@@ -63,17 +63,6 @@ from core.views.super_admin.auth_views import (
     super_admin_request_password_reset,
     super_admin_confirm_password_reset,
 )
-from core.views.help_support_views import (
-    super_admin_help_support_list,
-    super_admin_help_support_update,
-    super_admin_help_support_create,
-)
-from core.views.in_app_notification_views import (
-    in_app_notification_list_staff,
-    in_app_notification_create,
-    in_app_notification_recipients,
-)
-
 urlpatterns = [
     path('dashboard/', super_admin_required(super_admin_dashboard)),
     path('restaurants/check-slug/', super_admin_required(super_admin_restaurant_check_slug)),
@@ -93,9 +82,6 @@ urlpatterns = [
     path('finance/', super_admin_required(super_admin_finance)),
     path('customers/', super_admin_required(super_admin_customer_list)),
     path('notifications/', super_admin_required(super_admin_notification_list)),
-    path('in-app-notifications/', super_admin_required(in_app_notification_list_staff)),
-    path('in-app-notifications/send/', super_admin_required(in_app_notification_create)),
-    path('in-app-notifications/recipients/', super_admin_required(in_app_notification_recipients)),
     path('dues/', super_admin_required(super_admin_dues_list)),
     path('transactions/', super_admin_required(super_admin_transaction_list)),
     path('transaction-history/', super_admin_required(super_admin_transaction_history)),
@@ -128,7 +114,4 @@ urlpatterns = [
     path('profiles/<int:pk>/update/', super_admin_required(super_admin_profile_update)),
     path('auth/request-password-reset/', super_admin_required(super_admin_request_password_reset)),
     path('auth/confirm-password-reset/', super_admin_required(super_admin_confirm_password_reset)),
-    path('help-support/', super_admin_required(super_admin_help_support_list)),
-    path('help-support/create/', super_admin_required(super_admin_help_support_create)),
-    path('help-support/<int:pk>/update/', super_admin_required(super_admin_help_support_update)),
 ]

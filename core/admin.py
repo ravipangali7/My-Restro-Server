@@ -20,8 +20,6 @@ from .models import (
     Staff,
     Order,
     OrderItem,
-    Rider,
-    Delivery,
     Feedback,
     Purchase,
     PurchaseItem,
@@ -248,20 +246,6 @@ class OrderAdmin(admin.ModelAdmin):
     autocomplete_fields = ('customer', 'restaurant', 'table', 'waiter')
     inlines = (OrderItemInline,)
     readonly_fields = ('created_at', 'updated_at')
-
-
-@admin.register(Rider)
-class RiderAdmin(admin.ModelAdmin):
-    list_display = ('id', 'name', 'phone', 'source', 'is_available', 'last_updated')
-    list_filter = ('source', 'is_available')
-    search_fields = ('name', 'phone')
-
-
-@admin.register(Delivery)
-class DeliveryAdmin(admin.ModelAdmin):
-    list_display = ('order_id', 'order', 'rider', 'delivery_status', 'distance_km', 'eta_minutes', 'created_at')
-    list_filter = ('delivery_status',)
-    raw_id_fields = ('order', 'rider')
 
 
 @admin.register(OrderItem)
