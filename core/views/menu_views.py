@@ -9,31 +9,35 @@ from core.models import Restaurant, User, QrStandOrder, CustomerToken
 from core.utils import get_role
 
 
-# Path lists per role (must match frontend sidebarConfigs)
+# Path lists per role (must match frontend config/sidebar.ts)
 SUPER_ADMIN_PATHS = [
-    '/dashboard', '/restaurants', '/owners', '/kyc', '/finance',
-    '/transaction-history', '/shareholders', '/share-distribution', '/withdrawals', '/qr-orders', '/reports', '/super-settings', '/settings',
+    '/dashboard', '/restaurants', '/owners', '/kyc', '/shareholders',
+    '/transactions', '/withdrawals', '/dues', '/qr-orders', '/notifications',
+    '/reports', '/super-settings', '/settings',
 ]
 OWNER_FULL_PATHS = [
-    '/dashboard', '/orders', '/qr', '/qr-orders', '/menu', '/categories', '/units',
-    '/combos', '/recipes', '/inventory', '/vendors', '/purchases', '/staff',
-    '/staff-leaderboard', '/customers', '/analytics', '/pl-report', '/restaurants', '/transaction-history', '/settings',
+    '/dashboard', '/restaurants', '/staff', '/customers', '/vendors', '/qr-orders',
+    '/transaction-history', '/payments', '/payroll', '/notifications',
+    '/reports', '/pl-report', '/settings',
 ]
 OWNER_RESTRICTED_PATHS = [
-    '/dashboard', '/live-orders', '/reports', '/analytics', '/pl-report', '/restaurants', '/staff', '/payments', '/transaction-history', '/settings',
+    '/dashboard', '/restaurants', '/staff', '/qr-orders', '/transaction-history',
+    '/payments', '/payroll', '/notifications', '/reports', '/pl-report', '/settings',
 ]
 MANAGER_PATHS = [
-    '/dashboard', '/orders', '/qr', '/qr-orders', '/tables', '/order-menu', '/menu', '/categories', '/units',
-    '/combos', '/recipes', '/inventory', '/vendors', '/purchases', '/stock-logs', '/staff',
-    '/staff-leaderboard', '/attendance', '/customers', '/feedback', '/expenses',
-    '/finance-records', '/pl-report', '/transaction-history', '/notifications', '/analytics', '/restaurants', '/settings',
+    '/dashboard', '/menu', '/units', '/categories', '/combos', '/vendors', '/inventory', '/purchases',
+    '/tables', '/qr-orders', '/orders', '/finance-records', '/expenses', '/transaction-history', '/payments',
+    '/staff', '/attendance', '/payroll', '/customers', '/notifications', '/feedback',
+    '/reports', '/settings',
 ]
 WAITER_PATHS = [
-    '/dashboard', '/restaurants', '/qr', '/tables', '/order-menu', '/new-orders', '/orders', '/qr-orders', '/transaction-history', '/call-waiter', '/attendance', '/feedback', '/settings',
+    '/dashboard', '/order-menu', '/new-orders', '/orders', '/transaction-history', '/salary',
+    '/my-performance', '/attendance', '/feedback', '/settings',
 ]
-KITCHEN_PATHS = ['/dashboard', '/kitchen-dashboard']
+KITCHEN_PATHS = ['/live-orders', '/kitchen-dashboard']
 CUSTOMER_PATHS = [
-    '/dashboard', '/restaurants', '/orders', '/transaction-history', '/feedback', '/pending-payments', '/profile', '/change-password',
+    '/dashboard', '/restaurants', '/orders', '/transaction-history', '/pending-payments',
+    '/feedback', '/profile', '/change-password',
 ]
 
 
