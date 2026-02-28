@@ -5,11 +5,11 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
-from django.db.models import Sum
+from django.db.models import Sum, Q
 from django.utils import timezone
 
 from core.models import Expenses, Restaurant, Vendor
-from core.utils import get_restaurant_ids, auth_required
+from core.utils import get_restaurant_ids, auth_required, paginate_queryset, parse_date
 
 
 def _expense_to_dict(e):
@@ -55,12 +55,22 @@ def owner_expense_detail(request, pk):
 @require_http_methods(['GET'])
 def owner_expense_list(request):
     qs = _expense_qs(request)
+    start_date = parse_date(request.GET.get('start_date') or request.GET.get('date_from'))
+    end_date = parse_date(request.GET.get('end_date') or request.GET.get('date_to'))
+    if start_date:
+        qs = qs.filter(created_at__date__gte=start_date)
+    if end_date:
+        qs = qs.filter(created_at__date__lte=end_date)
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(name__icontains=search) | Q(description__icontains=search))
     now = timezone.now()
     this_month = qs.filter(created_at__year=now.year, created_at__month=now.month)
     total_this_month = this_month.aggregate(s=Sum('amount'))['s'] or Decimal('0')
     stats = {'total_this_month': str(total_this_month), 'unpaid': 0}
-    results = [_expense_to_dict(e) for e in qs.order_by('-created_at')[:100]]
-    return JsonResponse({'stats': stats, 'results': results})
+    qs_paged, pagination = paginate_queryset(qs.order_by('-created_at'), request, default_page_size=20)
+    results = [_expense_to_dict(e) for e in qs_paged]
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})
 
 
 @csrf_exempt

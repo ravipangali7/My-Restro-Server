@@ -4,10 +4,11 @@ from decimal import Decimal
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
-from django.db.models import Sum
+from django.db.models import Sum, Q
 
 from core.models import QrStandOrder, Restaurant
 from core.permissions import get_waiter_restaurant
+from core.utils import paginate_queryset, parse_date
 
 
 def _qr_order_to_dict(q):
@@ -30,12 +31,17 @@ def waiter_qr_order_list(request):
     if not restaurant:
         return JsonResponse({'error': 'No restaurant assigned'}, status=403)
     qs = QrStandOrder.objects.filter(restaurant=restaurant).select_related('restaurant')
-    date_from = request.GET.get('date_from')
-    date_to = request.GET.get('date_to')
-    if date_from:
-        qs = qs.filter(created_at__date__gte=date_from)
-    if date_to:
-        qs = qs.filter(created_at__date__lte=date_to)
+    start_date = parse_date(request.GET.get('start_date') or request.GET.get('date_from'))
+    end_date = parse_date(request.GET.get('end_date') or request.GET.get('date_to'))
+    if start_date:
+        qs = qs.filter(created_at__date__gte=start_date)
+    if end_date:
+        qs = qs.filter(created_at__date__lte=end_date)
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        qs = qs.filter(
+            Q(restaurant__name__icontains=search) | Q(restaurant__slug__icontains=search)
+        )
     total_orders = qs.count()
     pending = qs.filter(status='pending').count()
     accepted = qs.filter(status='accepted').count()
@@ -48,8 +54,9 @@ def waiter_qr_order_list(request):
         'delivered': delivered,
         'revenue': str(revenue),
     }
-    results = [_qr_order_to_dict(q) for q in qs.order_by('-created_at')[:100]]
-    return JsonResponse({'stats': stats, 'results': results})
+    qs_paged, pagination = paginate_queryset(qs.order_by('-created_at'), request, default_page_size=20)
+    results = [_qr_order_to_dict(q) for q in qs_paged]
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})
 
 
 @csrf_exempt

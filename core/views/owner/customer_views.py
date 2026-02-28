@@ -5,10 +5,10 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
-from django.db.models import Sum
+from django.db.models import Sum, Q
 
 from core.models import Customer, CustomerRestaurant, Order, Restaurant
-from core.utils import get_restaurant_ids, auth_required
+from core.utils import get_restaurant_ids, auth_required, paginate_queryset, parse_date
 
 
 def _customer_to_dict(c, extra=None):
@@ -31,7 +31,7 @@ def _customer_to_dict(c, extra=None):
 def owner_customer_list(request):
     rid = get_restaurant_ids(request)
     if not rid and not getattr(request.user, 'is_superuser', False):
-        return JsonResponse({'stats': {}, 'results': []})
+        return JsonResponse({'stats': {}, 'results': [], 'pagination': {'page': 1, 'page_size': 20, 'total_count': 0}})
     if getattr(request.user, 'is_superuser', False):
         restaurant_ids = list(Restaurant.objects.values_list('id', flat=True))
     else:
@@ -41,11 +41,24 @@ def owner_customer_list(request):
     order_customer_ids = list(Order.objects.filter(restaurant_id__in=restaurant_ids).exclude(customer_id__isnull=True).values_list('customer_id', flat=True).distinct())
     all_customer_ids = list(set(customer_ids) | set(order_customer_ids))
     if not all_customer_ids:
-        return JsonResponse({'stats': {'total': 0, 'vip': 0, 'credit': 0, 'due': 0}, 'results': []})
+        return JsonResponse({'stats': {'total': 0, 'vip': 0, 'credit': 0, 'due': 0}, 'results': [], 'pagination': {'page': 1, 'page_size': 20, 'total_count': 0}})
     customers = Customer.objects.filter(id__in=all_customer_ids)
+    start_date = parse_date(request.GET.get('start_date') or request.GET.get('date_from'))
+    end_date = parse_date(request.GET.get('end_date') or request.GET.get('date_to'))
+    if start_date:
+        customers = customers.filter(created_at__date__gte=start_date)
+    if end_date:
+        customers = customers.filter(created_at__date__lte=end_date)
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        customers = customers.filter(
+            Q(name__icontains=search) | Q(phone__icontains=search) | Q(address__icontains=search)
+        )
+    customers_ordered = customers.order_by('name')
+    qs_paged, pagination = paginate_queryset(customers_ordered, request, default_page_size=20)
     results = []
     vip_count = 0
-    for c in customers:
+    for c in qs_paged:
         cr = CustomerRestaurant.objects.filter(customer=c, restaurant_id__in=restaurant_ids).aggregate(to_pay=Sum('to_pay'), to_receive=Sum('to_receive'))
         order_count = Order.objects.filter(restaurant_id__in=restaurant_ids, customer=c).count()
         total_spent = Order.objects.filter(restaurant_id__in=restaurant_ids, customer=c).aggregate(s=Sum('total'))['s']
@@ -59,8 +72,8 @@ def owner_customer_list(request):
         }
         results.append(_customer_to_dict(c, extra))
     total_due = sum(Decimal(r['to_pay']) for r in results)
-    stats = {'total': len(results), 'vip': vip_count, 'credit': str(total_due), 'due': str(total_due)}
-    return JsonResponse({'stats': stats, 'results': results})
+    stats = {'total': pagination['total_count'], 'vip': vip_count, 'credit': str(total_due), 'due': str(total_due)}
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})
 
 
 @csrf_exempt

@@ -148,15 +148,15 @@ def _order_to_dict(o, include_items=False):
 @auth_required
 @require_http_methods(['GET'])
 def super_admin_restaurant_orders(request, pk):
-    """GET super_admin restaurants/<pk>/orders/ — paginated orders for restaurant. Params: status, date_from, date_to, page, page_size."""
+    """GET super_admin restaurants/<pk>/orders/ — paginated orders. Params: search, status, start_date/end_date (or date_from/date_to), page, page_size."""
     r = get_object_or_404(Restaurant, pk=pk)
     qs = Order.objects.filter(restaurant=r).select_related('table', 'customer', 'waiter__user').prefetch_related('items').order_by('-created_at')
-    date_from = request.GET.get('date_from')
-    date_to = request.GET.get('date_to')
-    if date_from:
-        qs = qs.filter(created_at__date__gte=date_from)
-    if date_to:
-        qs = qs.filter(created_at__date__lte=date_to)
+    start_date = parse_date(request.GET.get('start_date') or request.GET.get('date_from'))
+    end_date = parse_date(request.GET.get('end_date') or request.GET.get('date_to'))
+    if start_date:
+        qs = qs.filter(created_at__date__gte=start_date)
+    if end_date:
+        qs = qs.filter(created_at__date__lte=end_date)
     status = (request.GET.get('status') or '').strip().lower()
     if status and status != 'all':
         if status == 'paid':
@@ -165,12 +165,17 @@ def super_admin_restaurant_orders(request, pk):
             qs = qs.filter(status=OrderStatus.RUNNING)
         else:
             qs = qs.filter(status=status)
-    total_count = qs.count()
-    page = max(1, int(request.GET.get('page', 1)))
-    page_size = max(1, min(100, int(request.GET.get('page_size', 20))))
-    start = (page - 1) * page_size
-    results = [_order_to_dict(o, include_items=True) for o in qs[start : start + page_size]]
-    return JsonResponse({'count': total_count, 'results': results, 'page': page, 'page_size': page_size})
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        qs = qs.filter(
+            Q(table__name__icontains=search)
+            | Q(table_number__icontains=search)
+            | Q(customer__name__icontains=search)
+            | Q(customer__phone__icontains=search)
+        )
+    qs_paged, pagination = paginate_queryset(qs, request, default_page_size=20)
+    results = [_order_to_dict(o, include_items=True) for o in qs_paged]
+    return JsonResponse({'count': pagination['total_count'], 'results': results, 'page': pagination['page'], 'page_size': pagination['page_size'], 'pagination': pagination})
 
 
 @auth_required

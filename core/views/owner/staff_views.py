@@ -10,9 +10,9 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 
-from django.db.models import Count, Sum, Avg
+from django.db.models import Count, Sum, Avg, Q
 from core.models import Staff, Restaurant, Table, Order, Feedback, PaidRecord
-from core.utils import get_restaurant_ids, auth_required, image_url_for_request
+from core.utils import get_restaurant_ids, auth_required, image_url_for_request, paginate_queryset, parse_date
 from core.permissions import is_manager
 from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 
@@ -214,10 +214,25 @@ def owner_user_create(request):
 @require_http_methods(['GET'])
 def owner_staff_list(request):
     qs = _staff_qs(request)
+    start_date = parse_date(request.GET.get('start_date') or request.GET.get('date_from'))
+    end_date = parse_date(request.GET.get('end_date') or request.GET.get('date_to'))
+    if start_date:
+        qs = qs.filter(created_at__date__gte=start_date)
+    if end_date:
+        qs = qs.filter(created_at__date__lte=end_date)
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        qs = qs.filter(
+            Q(user__name__icontains=search)
+            | Q(user__phone__icontains=search)
+            | Q(designation__icontains=search)
+        )
     active = qs.filter(is_suspend=False)
     inactive = qs.filter(is_suspend=True)
     stats = {'total': qs.count(), 'active': active.count(), 'inactive': inactive.count()}
-    staff_list = list(qs.order_by('user__name'))
+    qs_ordered = qs.order_by('user__name')
+    qs_paged, pagination = paginate_queryset(qs_ordered, request, default_page_size=20)
+    staff_list = list(qs_paged)
     staff_ids = [s.id for s in staff_list]
     orders_handled_map = {}
     feedback_avg_map = {}
@@ -250,7 +265,7 @@ def owner_staff_list(request):
         total_paid = total_paid_map.get(s.id)
         d['total_paid'] = str(total_paid) if total_paid is not None else '0'
         results.append(d)
-    return JsonResponse({'stats': stats, 'results': results})
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})
 
 
 @csrf_exempt

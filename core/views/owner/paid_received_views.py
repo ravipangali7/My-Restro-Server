@@ -5,10 +5,10 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
-from django.db.models import Sum
+from django.db.models import Sum, Q
 
 from core.models import PaidRecord, ReceivedRecord, Restaurant, Vendor, Purchase, Expenses, Staff, Customer, Order
-from core.utils import get_restaurant_ids, auth_required
+from core.utils import get_restaurant_ids, auth_required, paginate_queryset, parse_date
 
 
 def _paid_to_dict(p):
@@ -42,12 +42,26 @@ def _received_to_dict(r):
 def owner_paid_list(request):
     rid = get_restaurant_ids(request)
     if not rid and not getattr(request.user, 'is_superuser', False):
-        return JsonResponse({'stats': {'total_paid': '0'}, 'results': []})
-    qs = PaidRecord.objects.filter(restaurant_id__in=rid)
+        return JsonResponse({'stats': {'total_paid': '0'}, 'results': [], 'pagination': {'page': 1, 'page_size': 20, 'total_count': 0}})
+    qs = PaidRecord.objects.filter(restaurant_id__in=rid).select_related('vendor')
+    start_date = parse_date(request.GET.get('start_date') or request.GET.get('date_from'))
+    end_date = parse_date(request.GET.get('end_date') or request.GET.get('date_to'))
+    if start_date:
+        qs = qs.filter(created_at__date__gte=start_date)
+    if end_date:
+        qs = qs.filter(created_at__date__lte=end_date)
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        qs = qs.filter(
+            Q(name__icontains=search)
+            | Q(remarks__icontains=search)
+            | Q(vendor__name__icontains=search)
+        )
     total = qs.aggregate(s=Sum('amount'))['s']
     stats = {'total_paid': str(total or 0)}
-    results = [_paid_to_dict(p) for p in qs.order_by('-created_at')[:100]]
-    return JsonResponse({'stats': stats, 'results': results})
+    qs_paged, pagination = paginate_queryset(qs.order_by('-created_at'), request, default_page_size=20)
+    results = [_paid_to_dict(p) for p in qs_paged]
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})
 
 
 @auth_required
@@ -55,12 +69,26 @@ def owner_paid_list(request):
 def owner_received_list(request):
     rid = get_restaurant_ids(request)
     if not rid and not getattr(request.user, 'is_superuser', False):
-        return JsonResponse({'stats': {'total_received': '0'}, 'results': []})
-    qs = ReceivedRecord.objects.filter(restaurant_id__in=rid)
+        return JsonResponse({'stats': {'total_received': '0'}, 'results': [], 'pagination': {'page': 1, 'page_size': 20, 'total_count': 0}})
+    qs = ReceivedRecord.objects.filter(restaurant_id__in=rid).select_related('customer')
+    start_date = parse_date(request.GET.get('start_date') or request.GET.get('date_from'))
+    end_date = parse_date(request.GET.get('end_date') or request.GET.get('date_to'))
+    if start_date:
+        qs = qs.filter(created_at__date__gte=start_date)
+    if end_date:
+        qs = qs.filter(created_at__date__lte=end_date)
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        qs = qs.filter(
+            Q(name__icontains=search)
+            | Q(remarks__icontains=search)
+            | Q(customer__name__icontains=search)
+        )
     total = qs.aggregate(s=Sum('amount'))['s']
     stats = {'total_received': str(total or 0)}
-    results = [_received_to_dict(r) for r in qs.order_by('-created_at')[:100]]
-    return JsonResponse({'stats': stats, 'results': results})
+    qs_paged, pagination = paginate_queryset(qs.order_by('-created_at'), request, default_page_size=20)
+    results = [_received_to_dict(r) for r in qs_paged]
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})
 
 
 @csrf_exempt

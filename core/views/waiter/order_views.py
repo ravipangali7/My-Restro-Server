@@ -6,9 +6,11 @@ from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
 
+from django.db.models import Q
+
 from core.models import Order, OrderItem, OrderStatus, OrderType, PaymentStatus, Customer, Delivery
 from core.payment_qr import generate_esewa_qr_png
-from core.utils import get_waiter_staff_id
+from core.utils import get_waiter_staff_id, paginate_queryset, parse_date
 from core.permissions import get_waiter_restaurant
 from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 from core.invoice_utils import get_invoice_extras
@@ -87,18 +89,32 @@ def _order_to_dict(o, include_items=False, request=None):
 
 @require_http_methods(['GET'])
 def waiter_order_list(request):
+    from django.db.models import Sum
+
     staff_id = get_waiter_staff_id(request)
     if not staff_id:
-        return JsonResponse({'stats': {}, 'results': []})
+        return JsonResponse({'stats': {}, 'results': [], 'pagination': {'page': 1, 'page_size': 20, 'total_count': 0}})
     qs = Order.objects.filter(waiter_id=staff_id).select_related('table', 'customer').prefetch_related('items')
-    # Optional filter: ?status=pending or ?new_only=1 (pending + accepted)
+    start_date = parse_date(request.GET.get('start_date') or request.GET.get('date_from'))
+    end_date = parse_date(request.GET.get('end_date') or request.GET.get('date_to'))
+    if start_date:
+        qs = qs.filter(created_at__date__gte=start_date)
+    if end_date:
+        qs = qs.filter(created_at__date__lte=end_date)
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        qs = qs.filter(
+            Q(table__name__icontains=search)
+            | Q(table_number__icontains=search)
+            | Q(customer__name__icontains=search)
+            | Q(customer__phone__icontains=search)
+        )
     status_filter = request.GET.get('status', '').strip().lower()
     new_only = request.GET.get('new_only', '').strip().lower() in ('1', 'true', 'yes')
     if status_filter == 'pending':
         qs = qs.filter(status=OrderStatus.PENDING)
     elif new_only:
         qs = qs.filter(status__in=(OrderStatus.PENDING, OrderStatus.ACCEPTED))
-    from django.db.models import Sum
     total_revenue = qs.exclude(status='rejected').aggregate(s=Sum('total'))['s'] or Decimal('0')
     stats = {
         'total': qs.count(),
@@ -109,8 +125,9 @@ def waiter_order_list(request):
         'rejected': qs.filter(status=OrderStatus.REJECTED).count(),
         'total_revenue': str(total_revenue),
     }
-    results = [_order_to_dict(o) for o in qs.order_by('-created_at')[:100]]
-    return JsonResponse({'stats': stats, 'results': results})
+    qs_paged, pagination = paginate_queryset(qs.order_by('-created_at'), request, default_page_size=20)
+    results = [_order_to_dict(o) for o in qs_paged]
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})
 
 
 @require_http_methods(['GET'])

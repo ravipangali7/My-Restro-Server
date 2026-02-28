@@ -5,10 +5,10 @@ from django.http import JsonResponse, HttpResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
-from django.db.models import Sum, Count
+from django.db.models import Sum, Count, Q
 
 from core.models import Order, OrderItem, Restaurant, OrderStatus, OrderType, PaymentStatus, Customer, Delivery, OrderType, Delivery, DeliveryStatus
-from core.utils import get_restaurant_ids, auth_required
+from core.utils import get_restaurant_ids, auth_required, paginate_queryset, parse_date
 from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 from core.invoice_utils import get_invoice_extras
 
@@ -80,18 +80,26 @@ def _order_qs(request):
 @auth_required
 @require_http_methods(['GET'])
 def owner_order_list(request):
-    """List orders with optional date/search. Returns stats + results."""
+    """List orders with optional date/search/pagination. Returns stats + results + pagination."""
     qs = _order_qs(request)
-    # Optional filters
-    date_from = request.GET.get('date_from')
-    date_to = request.GET.get('date_to')
-    if date_from:
-        qs = qs.filter(created_at__date__gte=date_from)
-    if date_to:
-        qs = qs.filter(created_at__date__lte=date_to)
+    # Date filters: support start_date/end_date and date_from/date_to
+    start_date = parse_date(request.GET.get('start_date') or request.GET.get('date_from'))
+    end_date = parse_date(request.GET.get('end_date') or request.GET.get('date_to'))
+    if start_date:
+        qs = qs.filter(created_at__date__gte=start_date)
+    if end_date:
+        qs = qs.filter(created_at__date__lte=end_date)
     status = request.GET.get('status')
     if status and status != 'all':
         qs = qs.filter(status=status)
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        qs = qs.filter(
+            Q(table__name__icontains=search)
+            | Q(table_number__icontains=search)
+            | Q(customer__name__icontains=search)
+            | Q(customer__phone__icontains=search)
+        )
     total_revenue = qs.aggregate(s=Sum('total'))['s'] or Decimal('0')
     stats = {
         'total_orders': qs.count(),
@@ -103,8 +111,9 @@ def owner_order_list(request):
         'paid': qs.filter(payment_status__in=[PaymentStatus.PAID, PaymentStatus.SUCCESS]).count(),
         'total_revenue': str(total_revenue),
     }
-    results = [_order_to_dict(o) for o in qs[:100]]
-    return JsonResponse({'stats': stats, 'results': results})
+    qs_paged, pagination = paginate_queryset(qs.order_by('-created_at'), request, default_page_size=20)
+    results = [_order_to_dict(o) for o in qs_paged]
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})
 
 
 @auth_required

@@ -5,11 +5,11 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
-from django.db.models import Sum, Count
+from django.db.models import Sum, Count, Q
 from django.utils import timezone
 
 from core.models import Vendor, Restaurant, PurchaseItem, PaidRecord
-from core.utils import get_restaurant_ids, auth_required
+from core.utils import get_restaurant_ids, auth_required, paginate_queryset, parse_date
 from core.constants import ALLOWED_COUNTRY_CODES, normalize_country_code
 
 
@@ -51,14 +51,24 @@ def _vendor_qs(request):
 @require_http_methods(['GET'])
 def owner_vendor_list(request):
     qs = _vendor_qs(request)
-    results = [_vendor_to_dict(v) for v in qs.order_by('name')]
+    start_date = parse_date(request.GET.get('start_date') or request.GET.get('date_from'))
+    end_date = parse_date(request.GET.get('end_date') or request.GET.get('date_to'))
+    if start_date:
+        qs = qs.filter(created_at__date__gte=start_date)
+    if end_date:
+        qs = qs.filter(created_at__date__lte=end_date)
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(name__icontains=search) | Q(phone__icontains=search))
     agg = qs.aggregate(to_pay=Sum('to_pay'), to_receive=Sum('to_receive'))
     stats = {
         'total': qs.count(),
         'total_to_pay': str(agg['to_pay'] or 0),
         'total_to_receive': str(agg['to_receive'] or 0),
     }
-    return JsonResponse({'stats': stats, 'results': results})
+    qs_paged, pagination = paginate_queryset(qs.order_by('name'), request, default_page_size=20)
+    results = [_vendor_to_dict(v) for v in qs_paged]
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})
 
 
 @csrf_exempt

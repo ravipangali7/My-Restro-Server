@@ -8,7 +8,7 @@ from django.shortcuts import get_object_or_404
 from django.db.models import Sum
 
 from core.models import Purchase, PurchaseItem, Restaurant, RawMaterial
-from core.utils import get_restaurant_ids, auth_required
+from core.utils import get_restaurant_ids, auth_required, paginate_queryset, parse_date
 
 
 def _purchase_to_dict(p, include_items=False):
@@ -53,10 +53,24 @@ def _purchase_qs(request):
 @require_http_methods(['GET'])
 def owner_purchase_list(request):
     qs = _purchase_qs(request)
+    start_date = parse_date(request.GET.get('start_date') or request.GET.get('date_from'))
+    end_date = parse_date(request.GET.get('end_date') or request.GET.get('date_to'))
+    if start_date:
+        qs = qs.filter(created_at__date__gte=start_date)
+    if end_date:
+        qs = qs.filter(created_at__date__lte=end_date)
+    search = (request.GET.get('search') or '').strip()
+    if search:
+        try:
+            sid = int(search)
+            qs = qs.filter(id=sid)
+        except ValueError:
+            pass
     agg = qs.aggregate(total_sum=Sum('total'))
     stats = {'total_purchases': qs.count(), 'total_amount': str(agg['total_sum'] or 0)}
-    results = [_purchase_to_dict(p) for p in qs.order_by('-created_at')[:100]]
-    return JsonResponse({'stats': stats, 'results': results})
+    qs_paged, pagination = paginate_queryset(qs.order_by('-created_at'), request, default_page_size=20)
+    results = [_purchase_to_dict(p) for p in qs_paged]
+    return JsonResponse({'stats': stats, 'results': results, 'pagination': pagination})
 
 
 @auth_required
