@@ -108,7 +108,6 @@ class User(AbstractUser):
     image = models.ImageField(upload_to='users/', blank=True, null=True)
     is_owner = models.BooleanField(default=False)
     is_restaurant_staff = models.BooleanField(default=False)
-    is_kitchen = models.BooleanField(default=False)
     kyc_status = models.CharField(
         max_length=20, choices=KycStatus.choices, default=KycStatus.PENDING
     )
@@ -497,6 +496,7 @@ class Staff(models.Model):
     )
     is_manager = models.BooleanField(default=False)
     is_waiter = models.BooleanField(default=False)
+    is_kitchen = models.BooleanField(default=False)
     designation = models.CharField(max_length=100, blank=True)
     joined_at = models.DateField(null=True, blank=True)
     salary = models.DecimalField(

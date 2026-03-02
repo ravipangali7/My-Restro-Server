@@ -231,8 +231,8 @@ class TableAdmin(admin.ModelAdmin):
 
 @admin.register(Staff)
 class StaffAdmin(admin.ModelAdmin):
-    list_display = ('user', 'restaurant', 'is_manager', 'is_waiter', 'to_pay', 'to_receive', 'created_at')
-    list_filter = ('restaurant', 'is_manager', 'is_waiter')
+    list_display = ('user', 'restaurant', 'is_manager', 'is_waiter', 'is_kitchen', 'to_pay', 'to_receive', 'created_at')
+    list_filter = ('restaurant', 'is_manager', 'is_waiter', 'is_kitchen')
     search_fields = ('user__username', 'user__name', 'designation')
     autocomplete_fields = ('restaurant', 'user')
     readonly_fields = ('created_at', 'updated_at')
