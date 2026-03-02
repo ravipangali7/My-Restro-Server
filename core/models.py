@@ -127,7 +127,7 @@ class User(AbstractUser):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
-    USERNAME_FIELD = 'username'  # Login uses (country_code, phone) via custom auth
+    USERNAME_FIELD = 'phone'  # Login uses (country_code, phone) via custom auth
 
     class Meta:
         db_table = 'core_user'
