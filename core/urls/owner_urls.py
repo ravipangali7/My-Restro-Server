@@ -108,6 +108,7 @@ from core.views.owner.stock_log_views import owner_stock_log_list
 from core.views.owner.attendance_views import owner_attendance_summary
 from core.views.owner.reports_views import owner_reports, owner_reports_export
 from core.views.owner.qr_order_views import owner_qr_order_list, owner_qr_order_create
+from core.views.owner.paid_received_views import owner_paid_list, owner_received_list, owner_paid_create, owner_received_create
 from core.rbac import require_permission
 from core.views.owner.settings_views import owner_settings
 from core.views.transaction_history_views import owner_transaction_history
@@ -180,12 +181,12 @@ urlpatterns = [
     path('raw-materials/<int:pk>/update/', _owner_access_when_locked(owner_raw_material_update)),
     path('raw-materials/<int:pk>/upload-image/', _owner_access_when_locked(owner_raw_material_upload_image)),
     path('raw-materials/<int:pk>/delete/', _owner_access_when_locked(owner_raw_material_delete)),
-    path('vendors/', _owner_access_when_locked(owner_vendor_list)),
-    path('vendors/create/', _owner_access_when_locked(owner_vendor_create)),
-    path('vendors/<int:pk>/analytics/', _owner_access_when_locked(owner_vendor_analytics)),
-    path('vendors/<int:pk>/update/', _owner_access_when_locked(owner_vendor_update)),
-    path('vendors/<int:pk>/upload-image/', _owner_access_when_locked(owner_vendor_upload_image)),
-    path('vendors/<int:pk>/delete/', _owner_access_when_locked(owner_vendor_delete)),
+    path('vendors/', _owner_access_when_locked(require_permission('manage_vendors')(owner_vendor_list))),
+    path('vendors/create/', _owner_access_when_locked(require_permission('manage_vendors')(owner_vendor_create))),
+    path('vendors/<int:pk>/analytics/', _owner_access_when_locked(require_permission('manage_vendors')(owner_vendor_analytics))),
+    path('vendors/<int:pk>/update/', _owner_access_when_locked(require_permission('manage_vendors')(owner_vendor_update))),
+    path('vendors/<int:pk>/upload-image/', _owner_access_when_locked(require_permission('manage_vendors')(owner_vendor_upload_image))),
+    path('vendors/<int:pk>/delete/', _owner_access_when_locked(require_permission('manage_vendors')(owner_vendor_delete))),
     path('purchases/', _owner_access_when_locked(owner_purchase_list)),
     path('purchases/<int:pk>/', _owner_access_when_locked(owner_purchase_detail)),
     path('purchases/create/', _owner_access_when_locked(owner_purchase_create)),
@@ -204,20 +205,24 @@ urlpatterns = [
     path('recipe-mapping/<int:pk>/update/', _owner_access_when_locked(owner_recipe_update)),
     path('recipe-mapping/<int:pk>/upload-image/', _owner_access_when_locked(owner_recipe_upload_image)),
     path('recipe-mapping/<int:pk>/delete/', _owner_access_when_locked(owner_recipe_delete)),
-    path('customers/', _owner_access_when_locked(owner_customer_list)),
-    path('customers/create/', _owner_access_when_locked(owner_customer_create)),
-    path('customers/<int:pk>/orders/', _owner_access_when_locked(owner_customer_order_list)),
-    path('customers/<int:pk>/', _owner_access_when_locked(owner_customer_detail)),
+    path('customers/', _owner_access_when_locked(require_permission('manage_customers')(owner_customer_list))),
+    path('customers/create/', _owner_access_when_locked(require_permission('manage_customers')(owner_customer_create))),
+    path('customers/<int:pk>/orders/', _owner_access_when_locked(require_permission('manage_customers')(owner_customer_order_list))),
+    path('customers/<int:pk>/', _owner_access_when_locked(require_permission('manage_customers')(owner_customer_detail))),
     path('leaderboard/', _owner_access_when_locked(owner_leaderboard)),
     path('reports/', _owner_access_when_locked(require_permission('view_reports')(owner_reports))),
     path('reports/export/', _owner_access_when_locked(require_permission('view_reports')(owner_reports_export))),
-    path('analytics/', _owner_access_when_locked(owner_analytics)),
-    path('pl/', _owner_access_when_locked(owner_pl)),
+    path('analytics/', _owner_access_when_locked(require_permission('manage_finance')(owner_analytics))),
+    path('pl/', _owner_access_when_locked(require_permission('manage_finance')(owner_pl))),
     path('tables/', _owner_access_when_locked(owner_table_list)),
     path('tables/create/', _owner_access_when_locked(owner_table_create)),
     path('tables/<int:pk>/update/', _owner_access_when_locked(owner_table_update)),
     path('tables/<int:pk>/delete/', _owner_access_when_locked(owner_table_delete)),
     path('feedback/', _owner_access_when_locked(owner_feedback_list)),
     path('stock-logs/', _owner_access_when_locked(owner_stock_log_list)),
-    path('transaction-history/', _owner_access_when_locked(owner_transaction_history)),
+    path('transaction-history/', _owner_access_when_locked(require_permission('manage_finance')(owner_transaction_history))),
+    path('paid/', _owner_access_when_locked(require_permission('manage_finance')(owner_paid_list))),
+    path('paid/create/', _owner_access_when_locked(require_permission('manage_finance')(owner_paid_create))),
+    path('received/', _owner_access_when_locked(require_permission('manage_finance')(owner_received_list))),
+    path('received/create/', _owner_access_when_locked(require_permission('manage_finance')(owner_received_create))),
 ]

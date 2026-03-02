@@ -21,18 +21,16 @@ OWNER_FULL_PATHS = [
     '/reports', '/pl-report', '/settings',
 ]
 OWNER_RESTRICTED_PATHS = [
-    '/dashboard', '/restaurants', '/staff', '/qr-orders', '/transaction-history',
-    '/payments', '/finance', '/payroll', '/notifications', '/reports', '/pl-report', '/settings',
-]
-MANAGER_PATHS = [
-    '/dashboard', '/menu', '/units', '/categories', '/combos', '/vendors', '/inventory', '/purchases',
-    '/tables', '/qr-orders', '/orders', '/finance-records', '/expenses', '/transaction-history', '/payments',
-    '/staff', '/attendance', '/payroll', '/customers', '/notifications', '/feedback',
+    '/dashboard', '/restaurants', '/staff', '/customers', '/vendors', '/qr-orders',
+    '/transaction-history', '/payments', '/finance', '/payroll', '/notifications',
     '/reports', '/pl-report', '/settings',
 ]
+MANAGER_PATHS = [
+    '/dashboard', '/menu', '/units', '/categories', '/combos', '/inventory', '/purchases',
+    '/tables', '/orders', '/finance-records', '/expenses', '/attendance', '/feedback',
+]
 WAITER_PATHS = [
-    '/dashboard', '/order-menu', '/new-orders', '/orders', '/transaction-history', '/salary',
-    '/my-performance', '/attendance', '/feedback', '/settings',
+    '/dashboard', '/orders', '/salary', '/my-performance', '/attendance', '/feedback',
 ]
 KITCHEN_PATHS = ['/live-orders', '/kitchen-dashboard']
 CUSTOMER_PATHS = [
