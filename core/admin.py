@@ -1,6 +1,7 @@
 from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.forms import AdminUserCreationForm, UserChangeForm
+from django.utils.translation import gettext_lazy as _
 from . import services
 from .models import (
     User,
@@ -88,7 +89,14 @@ class UserAdmin(BaseUserAdmin):
     ordering = ('-date_joined',)
     readonly_fields = ('created_at', 'updated_at')
 
-    fieldsets = BaseUserAdmin.fieldsets + (
+    # Explicit fieldsets: User model has email = None, so do not include 'email'
+    fieldsets = (
+        (None, {'fields': ('username', 'password')}),
+        (_('Personal info'), {'fields': ('first_name', 'last_name')}),
+        (_('Permissions'), {
+            'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions'),
+        }),
+        (_('Important dates'), {'fields': ('last_login', 'date_joined')}),
         ('Hero', {
             'fields': (
                 'name', 'phone', 'country_code', 'image',
@@ -99,7 +107,11 @@ class UserAdmin(BaseUserAdmin):
             )
         }),
     )
-    add_fieldsets = BaseUserAdmin.add_fieldsets + (
+    add_fieldsets = (
+        (None, {
+            'classes': ('wide',),
+            'fields': ('phone', 'password1', 'password2'),
+        }),
         ('None', {
             'fields': (
                 'name', 'phone', 'country_code', 'is_owner', 'is_restaurant_staff',
