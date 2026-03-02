@@ -68,6 +68,12 @@ class CustomUserCreationForm(AdminUserCreationForm):
             'name', 'phone', 'country_code', 'is_owner', 'is_restaurant_staff',
         )
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if 'phone' in self.fields:
+            self.fields['phone'].widget.attrs.pop('autofocus', None)
+            self.fields['phone'].widget.attrs.setdefault('autocomplete', 'username')
+
 
 class CustomUserChangeForm(UserChangeForm):
     """Edit form including all custom User model fields."""
@@ -112,7 +118,7 @@ class UserAdmin(BaseUserAdmin):
             'classes': ('wide',),
             'fields': ('phone', 'password1', 'password2'),
         }),
-        ('None', {
+        (_('Personal info'), {
             'fields': (
                 'name', 'phone', 'country_code', 'is_owner', 'is_restaurant_staff',
             )
