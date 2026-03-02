@@ -101,6 +101,8 @@ class BulkNotificationType(models.TextChoices):
 # --- Models ---
 
 class User(AbstractUser):
+    username = None
+    email = None
     """Custom user; id and password from AbstractUser."""
     name = models.CharField(max_length=255, blank=True)
     phone = models.CharField(max_length=20, unique=True)
@@ -127,7 +129,7 @@ class User(AbstractUser):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
-    USERNAME_FIELD = 'phone'  # Login uses (country_code, phone) via custom auth
+    USERNAME_FIELD = 'phone'  # Login uses phone via custom auth
 
     class Meta:
         db_table = 'core_user'
