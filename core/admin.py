@@ -116,11 +116,11 @@ class UserAdmin(BaseUserAdmin):
     add_fieldsets = (
         (None, {
             'classes': ('wide',),
-            'fields': ('phone', 'password1', 'password2'),
+            'fields': ('phone', 'country_code', 'password1', 'password2', 'name',  'is_owner', 'is_restaurant_staff',),
         }),
         (_('Personal info'), {
             'fields': (
-                'name', 'phone', 'country_code', 'is_owner', 'is_restaurant_staff',
+              
             )
         }),
     )
