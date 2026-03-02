@@ -101,7 +101,7 @@ class BulkNotificationType(models.TextChoices):
 # --- Models ---
 
 class User(AbstractUser):
-    username = None
+
     email = None
     """Custom user; id and password from AbstractUser."""
     name = models.CharField(max_length=255, blank=True)
