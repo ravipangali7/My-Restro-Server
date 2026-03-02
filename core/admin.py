@@ -1,6 +1,6 @@
 from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from django.contrib.auth.forms import UserCreationForm, UserChangeForm
+from django.contrib.auth.forms import AdminUserCreationForm, UserChangeForm
 from . import services
 from .models import (
     User,
@@ -59,11 +59,11 @@ class PurchaseItemInline(admin.TabularInline):
 # --- User (replace default auth User admin) ---
 
 
-class CustomUserCreationForm(UserCreationForm):
+class CustomUserCreationForm(AdminUserCreationForm):
     """Add form must declare custom fields so they render and save."""
-    class Meta(UserCreationForm.Meta):
+    class Meta(AdminUserCreationForm.Meta):
         model = User
-        fields = UserCreationForm.Meta.fields + (
+        fields = AdminUserCreationForm.Meta.fields + (
             'name', 'phone', 'country_code', 'is_owner', 'is_restaurant_staff',
         )
 
