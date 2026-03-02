@@ -84,12 +84,12 @@ class UserAdmin(BaseUserAdmin):
         'kyc_status', 'is_active', 'created_at'
     )
     list_filter = ('is_owner', 'is_restaurant_staff', 'kyc_status', 'is_active')
-    search_fields = ('name', 'phone', 'username', 'email')
+    search_fields = ('name', 'phone', 'username')
     ordering = ('-date_joined',)
     readonly_fields = ('created_at', 'updated_at')
 
     fieldsets = BaseUserAdmin.fieldsets + (
-        ('None', {
+        ('Hero', {
             'fields': (
                 'name', 'phone', 'country_code', 'image',
                 'is_owner', 'is_restaurant_staff', 'kyc_status', 'reject_reason',
