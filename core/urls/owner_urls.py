@@ -106,8 +106,9 @@ from core.views.owner.table_views import (
 from core.views.owner.feedback_views import owner_feedback_list
 from core.views.owner.stock_log_views import owner_stock_log_list
 from core.views.owner.attendance_views import owner_attendance_summary
-from core.views.owner.reports_views import owner_reports
+from core.views.owner.reports_views import owner_reports, owner_reports_export
 from core.views.owner.qr_order_views import owner_qr_order_list, owner_qr_order_create
+from core.rbac import require_permission
 from core.views.owner.settings_views import owner_settings
 from core.views.transaction_history_views import owner_transaction_history
 
@@ -208,7 +209,8 @@ urlpatterns = [
     path('customers/<int:pk>/orders/', _owner_access_when_locked(owner_customer_order_list)),
     path('customers/<int:pk>/', _owner_access_when_locked(owner_customer_detail)),
     path('leaderboard/', _owner_access_when_locked(owner_leaderboard)),
-    path('reports/', _owner_access_when_locked(owner_reports)),
+    path('reports/', _owner_access_when_locked(require_permission('view_reports')(owner_reports))),
+    path('reports/export/', _owner_access_when_locked(require_permission('view_reports')(owner_reports_export))),
     path('analytics/', _owner_access_when_locked(owner_analytics)),
     path('pl/', _owner_access_when_locked(owner_pl)),
     path('tables/', _owner_access_when_locked(owner_table_list)),

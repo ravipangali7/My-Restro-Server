@@ -17,18 +17,18 @@ SUPER_ADMIN_PATHS = [
 ]
 OWNER_FULL_PATHS = [
     '/dashboard', '/restaurants', '/staff', '/customers', '/vendors', '/qr-orders',
-    '/transaction-history', '/payments', '/payroll', '/notifications',
+    '/transaction-history', '/payments', '/finance', '/payroll', '/notifications',
     '/reports', '/pl-report', '/settings',
 ]
 OWNER_RESTRICTED_PATHS = [
     '/dashboard', '/restaurants', '/staff', '/qr-orders', '/transaction-history',
-    '/payments', '/payroll', '/notifications', '/reports', '/pl-report', '/settings',
+    '/payments', '/finance', '/payroll', '/notifications', '/reports', '/pl-report', '/settings',
 ]
 MANAGER_PATHS = [
     '/dashboard', '/menu', '/units', '/categories', '/combos', '/vendors', '/inventory', '/purchases',
     '/tables', '/qr-orders', '/orders', '/finance-records', '/expenses', '/transaction-history', '/payments',
     '/staff', '/attendance', '/payroll', '/customers', '/notifications', '/feedback',
-    '/reports', '/settings',
+    '/reports', '/pl-report', '/settings',
 ]
 WAITER_PATHS = [
     '/dashboard', '/order-menu', '/new-orders', '/orders', '/transaction-history', '/salary',

@@ -32,6 +32,7 @@ from core.views.super_admin.shareholder_views import (
     super_admin_shareholder_update,
 )
 from core.views.super_admin.reports_views import super_admin_reports, super_admin_reports_restaurants, super_admin_reports_export
+from core.rbac import require_permission
 from core.views.super_admin.share_distribution_views import (
     super_admin_share_distribution_list,
     super_admin_share_distribution_preview,
@@ -89,9 +90,9 @@ urlpatterns = [
     path('shareholders/<int:pk>/', super_admin_required(super_admin_shareholder_detail)),
     path('shareholders/create/', super_admin_required(super_admin_shareholder_create)),
     path('shareholders/<int:pk>/update/', super_admin_required(super_admin_shareholder_update)),
-    path('reports/', super_admin_required(super_admin_reports)),
-    path('reports/restaurants/', super_admin_required(super_admin_reports_restaurants)),
-    path('reports/export/', super_admin_required(super_admin_reports_export)),
+    path('reports/', super_admin_required(require_permission('view_reports')(super_admin_reports))),
+    path('reports/restaurants/', super_admin_required(require_permission('view_reports')(super_admin_reports_restaurants))),
+    path('reports/export/', super_admin_required(require_permission('view_reports')(super_admin_reports_export))),
     path('share-distribution/', super_admin_required(super_admin_share_distribution_list)),
     path('share-distribution/preview/', super_admin_required(super_admin_share_distribution_preview)),
     path('share-distribution/run/', super_admin_required(super_admin_share_distribution_run)),

@@ -1,6 +1,8 @@
 """Owner reports: Sales, Purchase, Expense, Paid/Received, Stock Movement. Scoped to owner's restaurants."""
+import csv
+import io
 from decimal import Decimal
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponse
 from django.views.decorators.http import require_http_methods
 from django.db.models import Sum
 from django.db.models.functions import TruncDate, TruncMonth, TruncYear
@@ -166,3 +168,114 @@ def owner_reports(request):
             'restaurant_id': filter_rid,
         },
     })
+
+
+@auth_required
+@require_http_methods(['GET'])
+def owner_reports_export(request):
+    """GET /owner/reports/export/?format=csv|pdf|excel&date_from=&date_to=&restaurant_id=
+    Export owner report data. Requires view_reports permission (enforced at URL layer).
+    """
+    rid = get_restaurant_ids(request)
+    if not rid and not getattr(request.user, 'is_superuser', False):
+        return JsonResponse({'error': 'No restaurants'}, status=403)
+
+    date_from = _parse_date(request.GET.get('date_from'))
+    date_to = _parse_date(request.GET.get('date_to'))
+    restaurant_id = request.GET.get('restaurant_id')
+    try:
+        filter_rid = int(restaurant_id) if restaurant_id else None
+    except (TypeError, ValueError):
+        filter_rid = None
+    if filter_rid and filter_rid not in rid and not getattr(request.user, 'is_superuser', False):
+        filter_rid = None
+    scope_rid = [filter_rid] if filter_rid else rid
+
+    # Reuse same queries as owner_reports for sales, purchase, expense, paid/received, stock
+    orders_qs = Order.objects.filter(restaurant_id__in=scope_rid).exclude(status=OrderStatus.REJECTED)
+    if date_from:
+        orders_qs = orders_qs.filter(created_at__date__gte=date_from)
+    if date_to:
+        orders_qs = orders_qs.filter(created_at__date__lte=date_to)
+    sales_total = orders_qs.aggregate(s=Sum('total'))['s'] or Decimal('0')
+
+    purchase_qs = Purchase.objects.filter(restaurant_id__in=scope_rid)
+    if date_from:
+        purchase_qs = purchase_qs.filter(created_at__date__gte=date_from)
+    if date_to:
+        purchase_qs = purchase_qs.filter(created_at__date__lte=date_to)
+    purchase_total = purchase_qs.aggregate(s=Sum('total'))['s'] or Decimal('0')
+
+    expense_qs = Expenses.objects.filter(restaurant_id__in=scope_rid)
+    if date_from:
+        expense_qs = expense_qs.filter(created_at__date__gte=date_from)
+    if date_to:
+        expense_qs = expense_qs.filter(created_at__date__lte=date_to)
+    expense_total = expense_qs.aggregate(s=Sum('amount'))['s'] or Decimal('0')
+
+    export_format = (request.GET.get('format') or 'csv').lower()
+    if export_format not in ('csv', 'pdf', 'excel'):
+        export_format = 'csv'
+
+    if export_format == 'pdf':
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas as pdf_canvas
+        from reportlab.lib.units import mm
+        buf = io.BytesIO()
+        c = pdf_canvas.Canvas(buf, pagesize=A4)
+        c.setFont('Helvetica', 14)
+        c.drawString(20 * mm, 270 * mm, 'Owner Report')
+        c.setFont('Helvetica', 10)
+        y = 255 * mm
+        if date_from or date_to:
+            c.drawString(20 * mm, y, f'Period: {date_from or "start"} to {date_to or "end"}')
+            y -= 6 * mm
+        c.drawString(20 * mm, y, f'Sales total: {_decimal_str(sales_total)}')
+        y -= 5 * mm
+        c.drawString(20 * mm, y, f'Purchase total: {_decimal_str(purchase_total)}')
+        y -= 5 * mm
+        c.drawString(20 * mm, y, f'Expense total: {_decimal_str(expense_total)}')
+        y -= 5 * mm
+        c.save()
+        buf.seek(0)
+        resp = HttpResponse(buf.getvalue(), content_type='application/pdf')
+        resp['Content-Disposition'] = 'attachment; filename="owner_report.pdf"'
+        return resp
+
+    if export_format == 'excel':
+        try:
+            from openpyxl import Workbook
+            wb = Workbook()
+            ws = wb.active
+            ws.title = 'Report'
+            ws.append(['Owner Report'])
+            ws.append(['Date from', date_from.isoformat() if date_from else ''])
+            ws.append(['Date to', date_to.isoformat() if date_to else ''])
+            ws.append([])
+            ws.append(['Metric', 'Total'])
+            ws.append(['Sales', _decimal_str(sales_total)])
+            ws.append(['Purchases', _decimal_str(purchase_total)])
+            ws.append(['Expenses', _decimal_str(expense_total)])
+            buf = io.BytesIO()
+            wb.save(buf)
+            buf.seek(0)
+            resp = HttpResponse(buf.getvalue(), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            resp['Content-Disposition'] = 'attachment; filename="owner_report.xlsx"'
+            return resp
+        except ImportError:
+            pass  # fall back to CSV
+
+    # CSV
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(['Owner Report'])
+    w.writerow(['Date from', date_from.isoformat() if date_from else ''])
+    w.writerow(['Date to', date_to.isoformat() if date_to else ''])
+    w.writerow([])
+    w.writerow(['Metric', 'Total'])
+    w.writerow(['Sales', _decimal_str(sales_total)])
+    w.writerow(['Purchases', _decimal_str(purchase_total)])
+    w.writerow(['Expenses', _decimal_str(expense_total)])
+    resp = HttpResponse(buf.getvalue(), content_type='text/csv')
+    resp['Content-Disposition'] = 'attachment; filename="owner_report.csv"'
+    return resp

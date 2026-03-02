@@ -28,12 +28,21 @@ from core.views.owner.paid_received_views import owner_paid_list, owner_received
 from core.views.owner.pl_views import owner_pl
 from core.views.owner.analytics_views import owner_analytics
 from core.views.owner.stock_log_views import owner_stock_log_list
+from core.views.owner.reports_views import owner_reports, owner_reports_export
 from core.views.transaction_history_views import manager_transaction_history
+from core.rbac import require_permission
 
 
 def _manager_view(view_func):
     """Wrap view with auth, manager role check, and due-balance lock check."""
     return auth_required(manager_required(manager_unlocked(view_func)))
+
+
+def _manager_view_perm(permission_code):
+    """Wrap view with auth, manager role, unlock check, and permission check."""
+    def wrapper(view_func):
+        return auth_required(manager_required(manager_unlocked(require_permission(permission_code)(view_func))))
+    return wrapper
 
 
 urlpatterns = [
@@ -60,7 +69,7 @@ urlpatterns = [
     path('tables/create/', _manager_view(owner_table_create)),
     path('tables/<int:pk>/update/', _manager_view(owner_table_update)),
     path('tables/<int:pk>/delete/', _manager_view(owner_table_delete)),
-    path('products/', _manager_view(owner_product_list)),
+    path('products/', _manager_view_perm('manage_products')(owner_product_list)),
     path('products/<int:pk>/', _manager_view(owner_product_detail)),
     path('products/create/', _manager_view(owner_product_create)),
     path('products/<int:pk>/update/', _manager_view(owner_product_update)),
@@ -125,5 +134,7 @@ urlpatterns = [
     path('pl/', _manager_view(owner_pl)),
     path('analytics/', _manager_view(owner_analytics)),
     path('stock-logs/', _manager_view(owner_stock_log_list)),
+    path('reports/', _manager_view_perm('view_reports')(owner_reports)),
+    path('reports/export/', _manager_view_perm('view_reports')(owner_reports_export)),
     path('transaction-history/', _manager_view(manager_transaction_history)),
 ]

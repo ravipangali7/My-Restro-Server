@@ -1017,3 +1017,60 @@ class BulkNotification(models.Model):
 
     def __str__(self):
         return f'BulkNotification #{self.id} ({self.type})'
+
+
+# --- RBAC: roles, permissions, role_permissions, user_roles ---
+
+
+class Role(models.Model):
+    """Role for RBAC; code matches get_role() strings."""
+    code = models.CharField(max_length=32, unique=True, db_index=True)
+    name = models.CharField(max_length=64)
+
+    class Meta:
+        db_table = 'core_role'
+        ordering = ['code']
+
+    def __str__(self):
+        return f'{self.name} ({self.code})'
+
+
+class Permission(models.Model):
+    """Permission key for API/sidebar; e.g. manage_menu, view_reports."""
+    code = models.CharField(max_length=64, unique=True, db_index=True)
+    name = models.CharField(max_length=128, blank=True)
+
+    class Meta:
+        db_table = 'core_permission'
+        ordering = ['code']
+
+    def __str__(self):
+        return f'{self.name or self.code} ({self.code})'
+
+
+class RolePermission(models.Model):
+    """M2M: which permissions a role has."""
+    role = models.ForeignKey(Role, on_delete=models.CASCADE, related_name='role_permissions')
+    permission = models.ForeignKey(Permission, on_delete=models.CASCADE, related_name='role_permissions')
+
+    class Meta:
+        db_table = 'core_role_permission'
+        unique_together = [['role', 'permission']]
+        ordering = ['role', 'permission']
+
+    def __str__(self):
+        return f'{self.role.code} -> {self.permission.code}'
+
+
+class UserRole(models.Model):
+    """Optional: assign role(s) to user. If empty, effective role comes from User/Staff flags."""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user_roles')
+    role = models.ForeignKey(Role, on_delete=models.CASCADE, related_name='user_roles')
+
+    class Meta:
+        db_table = 'core_user_role'
+        unique_together = [['user', 'role']]
+        ordering = ['user', 'role']
+
+    def __str__(self):
+        return f'{self.user_id} -> {self.role.code}'
