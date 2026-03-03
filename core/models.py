@@ -204,10 +204,6 @@ class Restaurant(models.Model):
     email = models.EmailField(blank=True)
     logo = models.ImageField(upload_to='restaurants/', blank=True, null=True)
     address = models.TextField(blank=True)
-    tax_percent = models.DecimalField(
-        max_digits=5, decimal_places=2, null=True, blank=True,
-        help_text='Tax percentage applied on subtotal for invoice (e.g. 13 for 13%%)'
-    )
     latitude = models.DecimalField(
         max_digits=10, decimal_places=7, null=True, blank=True,
         help_text='Pickup point for delivery'
@@ -223,7 +219,6 @@ class Restaurant(models.Model):
         max_digits=12, decimal_places=2, default=Decimal('0')
     )
     ug_api = models.CharField(max_length=255, blank=True, null=True)
-    esewa_merchant_id = models.CharField(max_length=255, blank=True, null=True, help_text='Esewa merchant ID for online payment QR')
     subscription_start = models.DateField(null=True, blank=True)
     subscription_end = models.DateField(null=True, blank=True)
     is_open = models.BooleanField(default=True)
@@ -1017,60 +1012,3 @@ class BulkNotification(models.Model):
 
     def __str__(self):
         return f'BulkNotification #{self.id} ({self.type})'
-
-
-# --- RBAC: roles, permissions, role_permissions, user_roles ---
-
-
-class Role(models.Model):
-    """Role for RBAC; code matches get_role() strings."""
-    code = models.CharField(max_length=32, unique=True, db_index=True)
-    name = models.CharField(max_length=64)
-
-    class Meta:
-        db_table = 'core_role'
-        ordering = ['code']
-
-    def __str__(self):
-        return f'{self.name} ({self.code})'
-
-
-class Permission(models.Model):
-    """Permission key for API/sidebar; e.g. manage_menu, view_reports."""
-    code = models.CharField(max_length=64, unique=True, db_index=True)
-    name = models.CharField(max_length=128, blank=True)
-
-    class Meta:
-        db_table = 'core_permission'
-        ordering = ['code']
-
-    def __str__(self):
-        return f'{self.name or self.code} ({self.code})'
-
-
-class RolePermission(models.Model):
-    """M2M: which permissions a role has."""
-    role = models.ForeignKey(Role, on_delete=models.CASCADE, related_name='role_permissions')
-    permission = models.ForeignKey(Permission, on_delete=models.CASCADE, related_name='role_permissions')
-
-    class Meta:
-        db_table = 'core_role_permission'
-        unique_together = [['role', 'permission']]
-        ordering = ['role', 'permission']
-
-    def __str__(self):
-        return f'{self.role.code} -> {self.permission.code}'
-
-
-class UserRole(models.Model):
-    """Optional: assign role(s) to user. If empty, effective role comes from User/Staff flags."""
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user_roles')
-    role = models.ForeignKey(Role, on_delete=models.CASCADE, related_name='user_roles')
-
-    class Meta:
-        db_table = 'core_user_role'
-        unique_together = [['user', 'role']]
-        ordering = ['user', 'role']
-
-    def __str__(self):
-        return f'{self.user_id} -> {self.role.code}'
