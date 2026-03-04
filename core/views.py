@@ -21,6 +21,8 @@ from .models import (
     QrStandOrder,
     QrStandOrderStatus,
     KycStatus,
+    BulkNotification,
+    Customer,
 )
 from .models import PaymentStatus
 from .permissions import IsSuperuser
@@ -45,6 +47,10 @@ from .serializers import (
     QrStandOrderDetailSerializer,
     QrStandOrderCreateSerializer,
     QrStandOrderUpdateSerializer,
+    BulkNotificationListSerializer,
+    BulkNotificationDetailSerializer,
+    BulkNotificationCreateUpdateSerializer,
+    CustomerListSerializer,
 )
 
 
@@ -993,3 +999,107 @@ def qr_stand_order_analytics(request):
         'order_status_distribution': order_status_distribution,
         'restaurant_orders': restaurant_orders,
     })
+
+
+# ---------- Notifications (super admin) ----------
+
+def _notification_data(request):
+    """Build data dict for create/update; parse receivers from JSON string if form data."""
+    data = dict(request.data) if hasattr(request.data, 'items') else {}
+    if request.FILES and 'image' in request.FILES:
+        data['image'] = request.FILES['image']
+    receivers = data.get('receivers')
+    if isinstance(receivers, str):
+        import json
+        try:
+            data['receivers'] = json.loads(receivers)
+        except Exception:
+            data['receivers'] = []
+    return data
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def notification_list(request):
+    if request.method == 'POST':
+        data = _notification_data(request)
+        serializer = BulkNotificationCreateUpdateSerializer(data=data, context={'request': request})
+        if serializer.is_valid():
+            obj = serializer.save()
+            obj.total_count = len(obj.receivers or [])
+            obj.sent_count = 0
+            obj.save(update_fields=['total_count', 'sent_count'])
+            return Response(
+                BulkNotificationDetailSerializer(obj, context={'request': request}).data,
+                status=status.HTTP_201_CREATED,
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    qs = BulkNotification.objects.select_related('restaurant').order_by('-created_at')
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(message__icontains=search)
+    type_filter = (request.query_params.get('type') or '').strip().lower()
+    if type_filter in ('sms', 'whatsapp'):
+        qs = qs.filter(type=type_filter)
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = BulkNotificationListSerializer(page, many=True, context={'request': request})
+    return paginator.get_paginated_response(serializer.data)
+
+
+@api_view(['GET', 'PATCH', 'PUT'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def notification_detail(request, pk):
+    try:
+        obj = BulkNotification.objects.select_related('restaurant').get(pk=pk)
+    except BulkNotification.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'GET':
+        serializer = BulkNotificationDetailSerializer(obj, context={'request': request})
+        return Response(serializer.data)
+    if request.method in ('PATCH', 'PUT'):
+        data = _notification_data(request)
+        serializer = BulkNotificationCreateUpdateSerializer(obj, data=data, partial=True, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            obj.refresh_from_db()
+            obj.total_count = len(obj.receivers or [])
+            obj.save(update_fields=['total_count'])
+            return Response(BulkNotificationDetailSerializer(obj, context={'request': request}).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def notification_send(request, pk):
+    try:
+        obj = BulkNotification.objects.select_related('restaurant').get(pk=pk)
+    except BulkNotification.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    total = len(obj.receivers or [])
+    if total == 0:
+        return Response({'detail': 'No receivers.'}, status=status.HTTP_400_BAD_REQUEST)
+    obj.sent_count = total
+    obj.save(update_fields=['sent_count'])
+    serializer = BulkNotificationDetailSerializer(obj, context={'request': request})
+    return Response(serializer.data)
+
+
+# ---------- Customers (super admin, for receiver picker) ----------
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def customer_list(request):
+    qs = Customer.objects.all().order_by('-created_at')
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(
+            Q(name__icontains=search) |
+            Q(phone__icontains=search) |
+            Q(country_code__icontains=search)
+        )
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = CustomerListSerializer(page, many=True, context={'request': request})
+    return paginator.get_paginated_response(serializer.data)

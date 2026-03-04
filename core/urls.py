@@ -49,4 +49,10 @@ urlpatterns = [
     path('qr-orders/', views.qr_stand_order_list),
     path('qr-orders/<int:pk>/', views.qr_stand_order_detail),
     path('qr-orders/<int:pk>/pay/', views.qr_stand_order_pay),
+    # Notifications (super admin)
+    path('notifications/', views.notification_list),
+    path('notifications/<int:pk>/', views.notification_detail),
+    path('notifications/<int:pk>/send/', views.notification_send),
+    # Customers (super admin, for receiver picker)
+    path('customers/', views.customer_list),
 ]

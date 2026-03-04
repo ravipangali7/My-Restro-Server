@@ -1,6 +1,16 @@
 from rest_framework import serializers
 from django.conf import settings
-from .models import User, Staff, Restaurant, ShareholderWithdrawal, QrStandOrder, Transaction, SuperSetting
+from .models import (
+    User,
+    Staff,
+    Restaurant,
+    ShareholderWithdrawal,
+    QrStandOrder,
+    Transaction,
+    SuperSetting,
+    BulkNotification,
+    Customer,
+)
 
 
 def _build_media_url(request, path):
@@ -492,3 +502,135 @@ class QrStandOrderUpdateSerializer(serializers.ModelSerializer):
             price = (ss.per_qr_stand_price or Decimal('0'))
             validated_data['total'] = Decimal(str(quantity)) * price
         return super().update(instance, validated_data)
+
+
+# --- BulkNotification (super admin) ---
+
+class BulkNotificationRestaurantMinSerializer(serializers.ModelSerializer):
+    logo_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Restaurant
+        fields = ['id', 'slug', 'name', 'phone', 'country_code', 'logo_url']
+
+    def get_logo_url(self, obj):
+        if not obj.logo:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.logo.url if hasattr(obj.logo, 'url') else str(obj.logo))
+
+
+class BulkNotificationListSerializer(serializers.ModelSerializer):
+    restaurant = BulkNotificationRestaurantMinSerializer(read_only=True)
+    image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BulkNotification
+        fields = [
+            'id', 'restaurant', 'message', 'image_url', 'type',
+            'sent_count', 'total_count', 'created_at', 'updated_at',
+        ]
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+
+
+class BulkNotificationDetailSerializer(serializers.ModelSerializer):
+    restaurant = BulkNotificationRestaurantMinSerializer(read_only=True)
+    image_url = serializers.SerializerMethodField()
+    receivers_expanded = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BulkNotification
+        fields = [
+            'id', 'restaurant', 'message', 'image_url', 'type',
+            'sent_count', 'total_count', 'receivers', 'receivers_expanded',
+            'created_at', 'updated_at',
+        ]
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+
+    def get_receivers_expanded(self, obj):
+        request = self.context.get('request')
+        expanded = []
+        receivers = obj.receivers or []
+        for r in receivers:
+            if not isinstance(r, dict):
+                continue
+            rtype = (r.get('type') or '').strip().lower()
+            rid = r.get('id')
+            if rid is None:
+                continue
+            entry = {'type': rtype, 'id': rid, 'name': '', 'country_code': '', 'phone': '', 'image_url': None}
+            try:
+                if rtype == 'restaurant':
+                    rest = Restaurant.objects.filter(pk=rid).first()
+                    if rest:
+                        entry['name'] = rest.name or ''
+                        entry['country_code'] = rest.country_code or ''
+                        entry['phone'] = rest.phone or ''
+                        if rest.logo:
+                            entry['image_url'] = _build_media_url(
+                                request, rest.logo.url if hasattr(rest.logo, 'url') else str(rest.logo)
+                            )
+                elif rtype in ('owner', 'shareholder'):
+                    user = User.objects.filter(pk=rid, is_owner=True).first()
+                    if user:
+                        entry['name'] = user.name or ''
+                        entry['country_code'] = user.country_code or ''
+                        entry['phone'] = user.phone or ''
+                        if user.image:
+                            entry['image_url'] = _build_media_url(
+                                request, user.image.url if hasattr(user.image, 'url') else str(user.image)
+                            )
+                elif rtype == 'customer':
+                    cust = Customer.objects.filter(pk=rid).first()
+                    if cust:
+                        entry['name'] = cust.name or ''
+                        entry['country_code'] = cust.country_code or ''
+                        entry['phone'] = cust.phone or ''
+            except Exception:
+                pass
+            expanded.append(entry)
+        return expanded
+
+
+class BulkNotificationCreateUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BulkNotification
+        fields = ['restaurant', 'message', 'type', 'receivers', 'image']
+
+    def validate_receivers(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError('receivers must be a list.')
+        for r in value:
+            if not isinstance(r, dict) or 'type' not in r or 'id' not in r:
+                raise serializers.ValidationError('Each receiver must have type and id.')
+            t = (r.get('type') or '').strip().lower()
+            if t not in ('restaurant', 'owner', 'customer', 'shareholder'):
+                raise serializers.ValidationError(f'Invalid receiver type: {t}')
+        return value
+
+    def validate_type(self, value):
+        v = (value or '').strip().lower()
+        if v not in ('sms', 'whatsapp'):
+            raise serializers.ValidationError('type must be sms or whatsapp.')
+        return v
+
+
+class CustomerListSerializer(serializers.ModelSerializer):
+    image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Customer
+        fields = ['id', 'name', 'phone', 'country_code', 'image_url', 'created_at']
+
+    def get_image_url(self, obj):
+        return None
