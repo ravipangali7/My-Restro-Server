@@ -7,7 +7,17 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 
-from .models import User, Restaurant, SuperSetting, ShareholderWithdrawal
+from .models import (
+    User,
+    Restaurant,
+    SuperSetting,
+    ShareholderWithdrawal,
+    Transaction,
+    TransactionType,
+    TransactionCategory,
+    WithdrawalStatus,
+)
+from .models import PaymentStatus
 from .permissions import IsSuperuser
 from .serializers import (
     OwnerSerializer,
@@ -19,6 +29,11 @@ from .serializers import (
     RestaurantCreateUpdateSerializer,
     RestaurantMinSerializer,
     ShareholderWithdrawalSerializer,
+    ShareholderWithdrawalListSerializer,
+    ShareholderWithdrawalCreateSerializer,
+    ShareholderWithdrawalDetailSerializer,
+    TransactionSerializer,
+    TransactionDetailSerializer,
 )
 
 
@@ -163,6 +178,8 @@ def owner_stats(request):
 
 def _restaurant_queryset(request):
     qs = Restaurant.objects.all().select_related('user').order_by('-created_at')
+    if request.query_params.get('has_due') == 'true':
+        qs = qs.filter(due_balance__gt=0)
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(
@@ -242,6 +259,51 @@ def restaurant_stats(request):
         'total_due': str(total_due),
         'total_revenue': str(total_revenue),
     })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def due_stats(request):
+    """Stats for Due listing: total due count/amount, over threshold, outstanding."""
+    qs_with_due = Restaurant.objects.filter(due_balance__gt=0)
+    total_due_count = qs_with_due.count()
+    total_due_amount = qs_with_due.aggregate(s=Sum('due_balance'))['s'] or 0
+    try:
+        ss = SuperSetting.objects.first()
+        threshold = (ss.due_threshold or 0) if ss else 0
+    except Exception:
+        threshold = 0
+    over_threshold_qs = Restaurant.objects.filter(due_balance__gt=threshold) if threshold else qs_with_due
+    over_threshold_count = over_threshold_qs.count()
+    over_threshold_amount = over_threshold_qs.aggregate(s=Sum('due_balance'))['s'] or 0
+    return Response({
+        'total_due_count': total_due_count,
+        'total_due_amount': str(total_due_amount),
+        'over_threshold_count': over_threshold_count,
+        'over_threshold_amount': str(over_threshold_amount),
+        'outstanding_count': total_due_count,
+        'outstanding_amount': str(total_due_amount),
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def restaurant_pay_due(request, pk):
+    from .services import pay_due_balance
+    try:
+        rest = Restaurant.objects.get(pk=pk)
+    except Restaurant.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    amount = request.data.get('amount')
+    if amount is None:
+        return Response({'detail': 'amount required'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        pay_due_balance(rest, amount)
+    except Exception as e:
+        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    rest.refresh_from_db()
+    serializer = RestaurantDetailSerializer(rest, context={'request': request})
+    return Response(serializer.data)
 
 
 # ---------- KYC ----------
@@ -413,3 +475,153 @@ def shareholder_withdrawal_history(request):
     page = paginator.paginate_queryset(qs, request)
     serializer = ShareholderWithdrawalSerializer(page, many=True)
     return paginator.get_paginated_response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def shareholder_withdrawal_stats(request):
+    qs = ShareholderWithdrawal.objects.all()
+    total_withdrawals = qs.count()
+    pending_count = qs.filter(status=WithdrawalStatus.PENDING).count()
+    approved_count = qs.filter(status=WithdrawalStatus.APPROVED).count()
+    reject_count = qs.filter(status=WithdrawalStatus.REJECT).count()
+    total_amount = qs.aggregate(s=Sum('amount'))['s'] or 0
+    pending_amount = qs.filter(status=WithdrawalStatus.PENDING).aggregate(s=Sum('amount'))['s'] or 0
+    approved_amount = qs.filter(status=WithdrawalStatus.APPROVED).aggregate(s=Sum('amount'))['s'] or 0
+    failed_amount = qs.filter(status=WithdrawalStatus.REJECT).aggregate(s=Sum('amount'))['s'] or 0
+    return Response({
+        'total_withdrawals': total_withdrawals,
+        'pending': pending_count,
+        'approved': approved_count,
+        'failed': reject_count,
+        'total_amount': str(total_amount),
+        'pending_amount': str(pending_amount),
+        'approved_amount': str(approved_amount),
+        'failed_amount': str(failed_amount),
+    })
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def shareholder_withdrawal_list(request):
+    if request.method == 'POST':
+        serializer = ShareholderWithdrawalCreateSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            w = serializer.instance
+            out_serializer = ShareholderWithdrawalSerializer(w, context={'request': request})
+            return Response(out_serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    user_id = request.query_params.get('user_id')
+    if user_id:
+        qs = ShareholderWithdrawal.objects.filter(user_id=user_id).select_related('user').order_by('-created_at')
+    else:
+        qs = ShareholderWithdrawal.objects.all().select_related('user').order_by('-created_at')
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = ShareholderWithdrawalListSerializer(page, many=True, context={'request': request})
+    return paginator.get_paginated_response(serializer.data)
+
+
+@api_view(['GET', 'PATCH', 'PUT'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def shareholder_withdrawal_detail(request, pk):
+    try:
+        w = ShareholderWithdrawal.objects.select_related('user').get(pk=pk)
+    except ShareholderWithdrawal.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'GET':
+        serializer = ShareholderWithdrawalDetailSerializer(w, context={'request': request})
+        return Response(serializer.data)
+    if request.method in ('PATCH', 'PUT'):
+        data = request.data
+        allowed = {'status', 'reject_reason'}
+        payload = {k: data[k] for k in allowed if k in data}
+        if not payload:
+            return Response(ShareholderWithdrawalDetailSerializer(w, context={'request': request}).data)
+        serializer = ShareholderWithdrawalSerializer(w, data=payload, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(ShareholderWithdrawalDetailSerializer(serializer.instance, context={'request': request}).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+# ---------- Transactions ----------
+
+def _transaction_queryset(request):
+    qs = Transaction.objects.select_related('restaurant', 'restaurant__user').order_by('-created_at')
+    txn_type = (request.query_params.get('transaction_type') or request.query_params.get('type') or '').strip().lower()
+    if txn_type in ('in', 'out'):
+        qs = qs.filter(transaction_type=txn_type)
+    start_dt, end_dt = _parse_date_range(request)
+    if start_dt is not None and end_dt is not None:
+        qs = qs.filter(created_at__gte=start_dt, created_at__lte=end_dt)
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(
+            Q(remarks__icontains=search) |
+            Q(payer_name__icontains=search) |
+            Q(utr__icontains=search) |
+            Q(restaurant__name__icontains=search) |
+            Q(restaurant__slug__icontains=search)
+        )
+    return qs
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def transaction_stats(request):
+    qs = Transaction.objects.all()
+    total_transaction = qs.count()
+    total_revenue = qs.filter(transaction_type=TransactionType.IN).aggregate(s=Sum('amount'))['s'] or 0
+    pending = qs.filter(payment_status=PaymentStatus.PENDING).count()
+    success = qs.filter(payment_status__in=[PaymentStatus.SUCCESS, PaymentStatus.PAID]).count()
+    failed = qs.exclude(payment_status__in=[PaymentStatus.PENDING, PaymentStatus.SUCCESS, PaymentStatus.PAID]).count()
+    # Per-category counts (for IN transactions, as revenue components)
+    subscription = qs.filter(category=TransactionCategory.SUBSCRIPTION_FEE).count()
+    qr_stand_order = qs.filter(category=TransactionCategory.QR_STAND_ORDER).count()
+    due_paid = qs.filter(category=TransactionCategory.DUE_PAID).count()
+    share_distribution = qs.filter(category=TransactionCategory.SHARE_DISTRIBUTION).count()
+    share_withdrawal = qs.filter(category=TransactionCategory.SHARE_WITHDRAWAL).count()
+    transaction_fee = qs.filter(category=TransactionCategory.TRANSACTION_FEE).count()
+    whatsapp_usage = qs.filter(category=TransactionCategory.WHATSAPP_USAGE).count()
+    return Response({
+        'total_transaction': total_transaction,
+        'total_revenue': str(total_revenue),
+        'pending': pending,
+        'success': success,
+        'failed': failed,
+        'subscription': subscription,
+        'qr_stand_order': qr_stand_order,
+        'due': due_paid,
+        'share_distribution': share_distribution,
+        'withdrawals': share_withdrawal,
+        'transaction_fee': transaction_fee,
+        'whatsapp_usage': whatsapp_usage,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def transaction_list(request):
+    qs = _transaction_queryset(request)
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    allowed = ['created_at', '-created_at', 'amount', '-amount']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = TransactionSerializer(page, many=True, context={'request': request})
+    return paginator.get_paginated_response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def transaction_detail(request, pk):
+    try:
+        txn = Transaction.objects.select_related('restaurant', 'restaurant__user').get(pk=pk)
+    except Transaction.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    serializer = TransactionDetailSerializer(txn, context={'request': request})
+    return Response(serializer.data)

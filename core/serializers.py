@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.conf import settings
-from .models import User, Staff, Restaurant, ShareholderWithdrawal, QrStandOrder
+from .models import User, Staff, Restaurant, ShareholderWithdrawal, QrStandOrder, Transaction
 
 
 def _build_media_url(request, path):
@@ -246,6 +246,73 @@ class RestaurantCreateUpdateSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+# --- Transaction ---
+
+class TransactionRestaurantMinSerializer(serializers.ModelSerializer):
+    """Minimal restaurant + owner for transaction list row."""
+    owner_name = serializers.SerializerMethodField()
+    owner_id = serializers.IntegerField(source='user_id', read_only=True)
+    owner_phone = serializers.SerializerMethodField()
+    owner_country_code = serializers.SerializerMethodField()
+    logo_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Restaurant
+        fields = ['id', 'slug', 'name', 'owner_id', 'owner_name', 'owner_phone', 'owner_country_code', 'logo_url']
+
+    def get_owner_name(self, obj):
+        user = getattr(obj, 'user', None)
+        return (user.name if user else '') or ''
+
+    def get_owner_phone(self, obj):
+        user = getattr(obj, 'user', None)
+        return (user.phone if user else '') or ''
+
+    def get_owner_country_code(self, obj):
+        user = getattr(obj, 'user', None)
+        return (user.country_code if user else '') or ''
+
+    def get_logo_url(self, obj):
+        if not obj.logo:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.logo.url if hasattr(obj.logo, 'url') else str(obj.logo))
+
+
+class TransactionSerializer(serializers.ModelSerializer):
+    """Transaction list item."""
+    reference = serializers.SerializerMethodField()
+    restaurant = TransactionRestaurantMinSerializer(read_only=True)
+
+    class Meta:
+        model = Transaction
+        fields = [
+            'id', 'reference', 'restaurant', 'amount', 'payment_status', 'transaction_type', 'category',
+            'utr', 'vpa', 'payer_name', 'remarks', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_reference(self, obj):
+        return obj.utr or str(obj.id)
+
+
+class TransactionDetailSerializer(serializers.ModelSerializer):
+    """Transaction detail for view page; includes full restaurant with owner."""
+    reference = serializers.SerializerMethodField()
+    restaurant = RestaurantDetailSerializer(read_only=True)
+
+    class Meta:
+        model = Transaction
+        fields = [
+            'id', 'reference', 'restaurant', 'amount', 'payment_status', 'transaction_type', 'category',
+            'utr', 'vpa', 'payer_name', 'remarks', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_reference(self, obj):
+        return obj.utr or str(obj.id)
+
+
 # --- Shareholder withdrawal ---
 
 class ShareholderWithdrawalSerializer(serializers.ModelSerializer):
@@ -254,3 +321,44 @@ class ShareholderWithdrawalSerializer(serializers.ModelSerializer):
     class Meta:
         model = ShareholderWithdrawal
         fields = ['id', 'user', 'user_name', 'amount', 'status', 'remarks', 'reject_reason', 'created_at']
+
+
+class ShareholderWithdrawalListSerializer(serializers.ModelSerializer):
+    """Withdrawal list with user details for table row."""
+    user_name = serializers.CharField(source='user.name', read_only=True)
+    user_phone = serializers.CharField(source='user.phone', read_only=True)
+    user_country_code = serializers.CharField(source='user.country_code', read_only=True)
+    user_balance = serializers.DecimalField(source='user.balance', max_digits=12, decimal_places=2, read_only=True)
+    user_share_percentage = serializers.DecimalField(source='user.share_percentage', max_digits=5, decimal_places=2, read_only=True)
+    user_image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ShareholderWithdrawal
+        fields = [
+            'id', 'user', 'user_name', 'user_phone', 'user_country_code',
+            'user_balance', 'user_share_percentage', 'user_image_url',
+            'amount', 'status', 'remarks', 'reject_reason', 'created_at',
+        ]
+
+    def get_user_image_url(self, obj):
+        user = getattr(obj, 'user', None)
+        if not user or not user.image:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, user.image.url if hasattr(user.image, 'url') else str(user.image))
+
+
+class ShareholderWithdrawalCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ShareholderWithdrawal
+        fields = ['user', 'amount', 'remarks']
+
+
+class ShareholderWithdrawalDetailSerializer(serializers.ModelSerializer):
+    """Withdrawal detail with full user (owner) info for view page."""
+    user_name = serializers.CharField(source='user.name', read_only=True)
+    user = OwnerSerializer(read_only=True)
+
+    class Meta:
+        model = ShareholderWithdrawal
+        fields = ['id', 'user', 'user_name', 'amount', 'status', 'remarks', 'reject_reason', 'created_at', 'updated_at']
