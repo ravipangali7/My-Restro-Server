@@ -39,6 +39,8 @@ from .serializers import (
     ShareholderWithdrawalDetailSerializer,
     TransactionSerializer,
     TransactionDetailSerializer,
+    SuperSettingSerializer,
+    SuperSettingUpdateSerializer,
     QrStandOrderListSerializer,
     QrStandOrderDetailSerializer,
     QrStandOrderCreateSerializer,
@@ -757,6 +759,89 @@ def transaction_detail(request, pk):
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     serializer = TransactionDetailSerializer(txn, context={'request': request})
     return Response(serializer.data)
+
+
+# ---------- Super Settings (super admin) ----------
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def super_setting_detail(request):
+    """GET: return latest SuperSetting; PATCH: update it. Creates one if none exists (GET)."""
+    from .services import get_super_setting
+    ss = get_super_setting()
+    if request.method == 'GET':
+        serializer = SuperSettingSerializer(ss, context={'request': request})
+        return Response(serializer.data)
+    # PATCH
+    serializer = SuperSettingUpdateSerializer(ss, data=request.data, partial=True, context={'request': request})
+    if serializer.is_valid():
+        serializer.save()
+        ss.refresh_from_db()
+        return Response(SuperSettingSerializer(ss, context={'request': request}).data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def super_settings_overview(request):
+    """Live platform stats: users (total, owners, shareholders, kyc), restaurants (total, open, expired, with_due)."""
+    from django.utils import timezone as tz
+    today = tz.now().date()
+    users_total = User.objects.count()
+    users_owners = User.objects.filter(is_owner=True).count()
+    users_shareholders = User.objects.filter(is_shareholder=True).count()
+    users_kyc_pending = User.objects.filter(kyc_status=KycStatus.PENDING).count()
+    users_kyc_rejected = User.objects.filter(kyc_status=KycStatus.REJECTED).count()
+    rest_total = Restaurant.objects.count()
+    rest_open = Restaurant.objects.filter(is_open=True).count()
+    rest_expired = Restaurant.objects.filter(subscription_end__lt=today).count()
+    rest_with_due = Restaurant.objects.filter(due_balance__gt=0).count()
+    return Response({
+        'users': {
+            'total': users_total,
+            'owners': users_owners,
+            'shareholders': users_shareholders,
+            'kyc_pending': users_kyc_pending,
+            'kyc_rejected': users_kyc_rejected,
+        },
+        'restaurants': {
+            'total': rest_total,
+            'open': rest_open,
+            'subscription_expired': rest_expired,
+            'with_due': rest_with_due,
+        },
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def super_settings_fee_income(request):
+    """Fee income by category (transaction_fee, subscription_fee, qr_stand_order, whatsapp_usage) and monthly trend."""
+    fee_categories = [
+        TransactionCategory.TRANSACTION_FEE,
+        TransactionCategory.SUBSCRIPTION_FEE,
+        TransactionCategory.QR_STAND_ORDER,
+        TransactionCategory.WHATSAPP_USAGE,
+    ]
+    qs = Transaction.objects.filter(
+        transaction_type=TransactionType.IN,
+        category__in=fee_categories,
+    )
+    start_dt, end_dt = _parse_date_range(request)
+    if start_dt is not None and end_dt is not None:
+        qs = qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
+    by_cat = qs.values('category').annotate(total=Sum('amount')).order_by('category')
+    by_category = [{'category': r['category'], 'total': str(r['total'] or 0)} for r in by_cat]
+    monthly_qs = qs.annotate(month_key=TruncMonth('created_at')).values('month_key').annotate(amount=Sum('amount')).order_by('month_key')
+    monthly_trend = []
+    for r in monthly_qs:
+        mk = r['month_key']
+        month_str = mk.strftime('%Y-%m') if hasattr(mk, 'strftime') else str(mk)[:7]
+        monthly_trend.append({'month': month_str, 'amount': str(r['amount'] or 0)})
+    return Response({
+        'by_category': by_category,
+        'monthly_trend': monthly_trend,
+    })
 
 
 # ---------- QR Stand Order ----------

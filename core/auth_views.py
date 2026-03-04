@@ -51,11 +51,38 @@ def login(request):
     })
 
 
-@api_view(['GET'])
+@api_view(['GET', 'PATCH'])
 @permission_classes([IsAuthenticated])
 def me(request):
-    """Return current user payload. Requires Token auth."""
-    return Response({'user': UserSerializer(request.user).data})
+    """GET: return current user (with image_url, last_login). PATCH: update name, image, and/or password."""
+    user = request.user
+    if request.method == 'GET':
+        return Response({'user': UserSerializer(user, context={'request': request}).data})
+    # PATCH
+    if request.content_type and 'multipart/form-data' in request.content_type:
+        data = request.data
+    else:
+        data = request.data
+    updated = False
+    if 'name' in data and data['name'] is not None:
+        user.name = data['name']
+        updated = True
+    if 'image' in data:
+        user.image = data['image']
+        updated = True
+    current_password = data.get('current_password')
+    new_password = data.get('new_password')
+    if current_password is not None and new_password is not None:
+        if not user.check_password(current_password):
+            return Response(
+                {'detail': 'Current password is wrong.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        user.set_password(new_password)
+        updated = True
+    if updated:
+        user.save()
+    return Response({'user': UserSerializer(user, context={'request': request}).data})
 
 
 @api_view(['POST'])

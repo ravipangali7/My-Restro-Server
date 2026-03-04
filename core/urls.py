@@ -38,6 +38,10 @@ urlpatterns = [
     path('transactions/stats/', views.transaction_stats),
     path('transactions/', views.transaction_list),
     path('transactions/<int:pk>/', views.transaction_detail),
+    # Super Settings (super admin)
+    path('super-settings/overview/', views.super_settings_overview),
+    path('super-settings/fee-income/', views.super_settings_fee_income),
+    path('super-settings/', views.super_setting_detail),
     # QR Stand Orders (super admin)
     path('qr-orders/price/', views.qr_stand_order_price),
     path('qr-orders/stats/', views.qr_stand_order_stats),

@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.conf import settings
-from .models import User, Staff, Restaurant, ShareholderWithdrawal, QrStandOrder, Transaction
+from .models import User, Staff, Restaurant, ShareholderWithdrawal, QrStandOrder, Transaction, SuperSetting
 
 
 def _build_media_url(request, path):
@@ -13,8 +13,9 @@ def _build_media_url(request, path):
 
 
 class UserSerializer(serializers.ModelSerializer):
-    """Safe user fields for API responses; no password."""
+    """Safe user fields for API responses; no password. Includes image_url and last_login for profile/me."""
     staff_role = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -33,8 +34,16 @@ class UserSerializer(serializers.ModelSerializer):
             'balance',
             'due_balance',
             'created_at',
+            'last_login',
+            'image_url',
         ]
         read_only_fields = fields
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
 
     def get_staff_role(self, obj):
         staff = obj.staff_profiles.first()
@@ -47,6 +56,52 @@ class UserSerializer(serializers.ModelSerializer):
         if staff.is_kitchen:
             return 'kitchen'
         return None
+
+
+# --- SuperSetting (super admin) ---
+
+class SuperSettingSerializer(serializers.ModelSerializer):
+    """Read-only representation of SuperSetting for GET."""
+    class Meta:
+        model = SuperSetting
+        fields = [
+            'id',
+            'per_qr_stand_price',
+            'subscription_fee_per_month',
+            'per_transaction_fee',
+            'due_threshold',
+            'is_subscription_fee',
+            'is_whatsapp_usgage',
+            'whatsapp_per_usgage',
+            'share_distribution_day',
+            'ug_api',
+            'balance',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class SuperSettingUpdateSerializer(serializers.ModelSerializer):
+    """Editable fields for PATCH; balance and timestamps are read-only."""
+    class Meta:
+        model = SuperSetting
+        fields = [
+            'per_qr_stand_price',
+            'subscription_fee_per_month',
+            'per_transaction_fee',
+            'due_threshold',
+            'is_subscription_fee',
+            'is_whatsapp_usgage',
+            'whatsapp_per_usgage',
+            'share_distribution_day',
+            'ug_api',
+        ]
+
+    def validate_share_distribution_day(self, value):
+        if value is not None and (value < 1 or value > 31):
+            raise serializers.ValidationError('Must be between 1 and 31.')
+        return value
 
 
 # --- Owner (User with is_owner=True) ---
