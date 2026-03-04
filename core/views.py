@@ -637,6 +637,16 @@ def transaction_detail(request, pk):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuser])
+def qr_stand_order_price(request):
+    """Return per_qr_stand_price from SuperSetting for real-time total calculation in add form."""
+    from .services import get_super_setting
+    ss = get_super_setting()
+    price = ss.per_qr_stand_price or 0
+    return Response({'per_qr_stand_price': str(price)})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
 def qr_stand_order_stats(request):
     qs = QrStandOrder.objects.all()
     total_orders = qs.count()
