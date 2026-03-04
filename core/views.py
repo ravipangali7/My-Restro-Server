@@ -226,6 +226,9 @@ def _restaurant_queryset(request):
     qs = Restaurant.objects.all().select_related('user').order_by('-created_at')
     if request.query_params.get('has_due') == 'true':
         qs = qs.filter(due_balance__gt=0)
+    if request.query_params.get('subscription_expired') == 'true':
+        today = timezone.now().date()
+        qs = qs.filter(subscription_end__lt=today)
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(
@@ -802,6 +805,7 @@ def super_settings_overview(request):
     rest_open = Restaurant.objects.filter(is_open=True).count()
     rest_expired = Restaurant.objects.filter(subscription_end__lt=today).count()
     rest_with_due = Restaurant.objects.filter(due_balance__gt=0).count()
+    total_user_due = User.objects.aggregate(s=Sum('due_balance'))['s'] or Decimal('0')
     return Response({
         'users': {
             'total': users_total,
@@ -815,6 +819,65 @@ def super_settings_overview(request):
             'open': rest_open,
             'subscription_expired': rest_expired,
             'with_due': rest_with_due,
+        },
+        'total_user_due': str(total_user_due),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def super_settings_dashboard_stats(request):
+    """Single endpoint for dashboard: system balance, transactions, qr orders, revenue, users, restaurants, withdrawals, due_balances, notification_stats."""
+    from .services import get_super_setting
+    today = timezone.now().date()
+    ss = get_super_setting()
+    system_balance = ss.balance or Decimal('0')
+    total_transactions = Transaction.objects.count()
+    total_qr_stand_orders = QrStandOrder.objects.count()
+    total_revenue = Transaction.objects.filter(
+        transaction_type=TransactionType.IN,
+        payment_status__in=[PaymentStatus.SUCCESS, PaymentStatus.PAID],
+    ).aggregate(s=Sum('amount'))['s'] or Decimal('0')
+    users_total = User.objects.count()
+    users_owners = User.objects.filter(is_owner=True).count()
+    users_shareholders = User.objects.filter(is_shareholder=True).count()
+    users_kyc_pending = User.objects.filter(kyc_status=KycStatus.PENDING).count()
+    rest_total = Restaurant.objects.count()
+    rest_open = Restaurant.objects.filter(is_open=True).count()
+    rest_expired = Restaurant.objects.filter(subscription_end__lt=today).count()
+    rest_with_due = Restaurant.objects.filter(due_balance__gt=0).count()
+    withdrawal_pending = ShareholderWithdrawal.objects.filter(status=WithdrawalStatus.PENDING).count()
+    withdrawal_approved = ShareholderWithdrawal.objects.filter(status=WithdrawalStatus.APPROVED).count()
+    total_user_due = User.objects.aggregate(s=Sum('due_balance'))['s'] or Decimal('0')
+    notif_total = BulkNotification.objects.count()
+    notif_sms = BulkNotification.objects.filter(type='sms').count()
+    notif_whatsapp = BulkNotification.objects.filter(type='whatsapp').count()
+    return Response({
+        'system_balance': str(system_balance),
+        'total_transactions': total_transactions,
+        'total_qr_stand_orders': total_qr_stand_orders,
+        'total_revenue': str(total_revenue),
+        'users': {
+            'total': users_total,
+            'owners': users_owners,
+            'shareholders': users_shareholders,
+            'kyc_pending': users_kyc_pending,
+        },
+        'restaurants': {
+            'total': rest_total,
+            'active': rest_open,
+            'subscription_expired': rest_expired,
+            'with_due': rest_with_due,
+        },
+        'withdrawals': {
+            'pending': withdrawal_pending,
+            'approved': withdrawal_approved,
+        },
+        'due_balances': str(total_user_due),
+        'notification_stats': {
+            'total': notif_total,
+            'sms': notif_sms,
+            'whatsapp': notif_whatsapp,
         },
     })
 
@@ -1084,6 +1147,21 @@ def notification_send(request, pk):
     obj.save(update_fields=['sent_count'])
     serializer = BulkNotificationDetailSerializer(obj, context={'request': request})
     return Response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def notification_stats(request):
+    """Return total, sms, whatsapp counts for BulkNotification."""
+    qs = BulkNotification.objects.all()
+    total = qs.count()
+    sms = qs.filter(type='sms').count()
+    whatsapp = qs.filter(type='whatsapp').count()
+    return Response({
+        'total': total,
+        'sms': sms,
+        'whatsapp': whatsapp,
+    })
 
 
 # ---------- Customers (super admin, for receiver picker) ----------

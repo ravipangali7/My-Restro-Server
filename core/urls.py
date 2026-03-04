@@ -40,6 +40,7 @@ urlpatterns = [
     path('transactions/<int:pk>/', views.transaction_detail),
     # Super Settings (super admin)
     path('super-settings/overview/', views.super_settings_overview),
+    path('super-settings/dashboard-stats/', views.super_settings_dashboard_stats),
     path('super-settings/fee-income/', views.super_settings_fee_income),
     path('super-settings/', views.super_setting_detail),
     # QR Stand Orders (super admin)
@@ -50,6 +51,7 @@ urlpatterns = [
     path('qr-orders/<int:pk>/', views.qr_stand_order_detail),
     path('qr-orders/<int:pk>/pay/', views.qr_stand_order_pay),
     # Notifications (super admin)
+    path('notifications/stats/', views.notification_stats),
     path('notifications/', views.notification_list),
     path('notifications/<int:pk>/', views.notification_detail),
     path('notifications/<int:pk>/send/', views.notification_send),
