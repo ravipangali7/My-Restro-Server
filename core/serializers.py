@@ -178,7 +178,7 @@ class RestaurantMinSerializer(serializers.ModelSerializer):
 
 class RestaurantListSerializer(serializers.ModelSerializer):
     """Restaurant list item; include owner name and logo URL."""
-    owner_name = serializers.CharField(source='user.name', read_only=True)
+    owner_name = serializers.SerializerMethodField()
     logo_url = serializers.SerializerMethodField()
     is_active = serializers.SerializerMethodField()
 
@@ -187,17 +187,28 @@ class RestaurantListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'slug', 'name', 'phone', 'country_code', 'address',
             'balance', 'due_balance', 'subscription_start', 'subscription_end',
-            'is_open', 'created_at', 'owner_name', 'logo_url', 'user_id',
+            'is_open', 'created_at', 'owner_name', 'logo_url', 'user',
         ]
+
+    def get_owner_name(self, obj):
+        try:
+            user = getattr(obj, 'user', None)
+            return (user.name if user else '') or ''
+        except Exception:
+            return ''
 
     def get_logo_url(self, obj):
         if not obj.logo:
             return None
-        request = self.context.get('request')
-        return _build_media_url(request, obj.logo.url if hasattr(obj.logo, 'url') else str(obj.logo))
+        try:
+            request = self.context.get('request')
+            url = obj.logo.url if hasattr(obj.logo, 'url') else str(obj.logo)
+            return _build_media_url(request, url)
+        except Exception:
+            return None
 
     def get_is_active(self, obj):
-        return obj.is_open
+        return getattr(obj, 'is_open', False)
 
 
 class RestaurantDetailSerializer(serializers.ModelSerializer):
