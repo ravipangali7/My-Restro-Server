@@ -16,6 +16,8 @@ from .models import (
     TransactionType,
     TransactionCategory,
     WithdrawalStatus,
+    QrStandOrder,
+    QrStandOrderStatus,
 )
 from .models import PaymentStatus
 from .permissions import IsSuperuser
@@ -34,6 +36,10 @@ from .serializers import (
     ShareholderWithdrawalDetailSerializer,
     TransactionSerializer,
     TransactionDetailSerializer,
+    QrStandOrderListSerializer,
+    QrStandOrderDetailSerializer,
+    QrStandOrderCreateSerializer,
+    QrStandOrderUpdateSerializer,
 )
 
 
@@ -624,4 +630,91 @@ def transaction_detail(request, pk):
     except Transaction.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     serializer = TransactionDetailSerializer(txn, context={'request': request})
+    return Response(serializer.data)
+
+
+# ---------- QR Stand Order ----------
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def qr_stand_order_stats(request):
+    qs = QrStandOrder.objects.all()
+    total_orders = qs.count()
+    pending = qs.filter(status=QrStandOrderStatus.PENDING).count()
+    accepted = qs.filter(status=QrStandOrderStatus.ACCEPTED).count()
+    delivered = qs.filter(status__in=[QrStandOrderStatus.SHIPPED, QrStandOrderStatus.DELIVERED]).count()
+    revenue_agg = qs.filter(payment_status__in=[PaymentStatus.PAID, PaymentStatus.SUCCESS]).aggregate(s=Sum('total'))
+    total_revenue = revenue_agg['s'] or 0
+    return Response({
+        'total_orders': total_orders,
+        'pending': pending,
+        'accepted': accepted,
+        'delivered': delivered,
+        'total_revenue': str(total_revenue),
+    })
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def qr_stand_order_list(request):
+    if request.method == 'POST':
+        serializer = QrStandOrderCreateSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            order = serializer.instance
+            out_serializer = QrStandOrderDetailSerializer(order, context={'request': request})
+            return Response(out_serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    qs = QrStandOrder.objects.select_related('restaurant').order_by('-created_at')
+    status_filter = request.query_params.get('status', '').strip().lower()
+    if status_filter in ('pending', 'accepted', 'shipped', 'delivered'):
+        qs = qs.filter(status=status_filter)
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = QrStandOrderListSerializer(page, many=True, context={'request': request})
+    return paginator.get_paginated_response(serializer.data)
+
+
+@api_view(['GET', 'PATCH', 'PUT', 'DELETE'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def qr_stand_order_detail(request, pk):
+    try:
+        order = QrStandOrder.objects.select_related('restaurant').get(pk=pk)
+    except QrStandOrder.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'GET':
+        serializer = QrStandOrderDetailSerializer(order, context={'request': request})
+        return Response(serializer.data)
+    if request.method == 'DELETE':
+        order.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    if request.method in ('PATCH', 'PUT'):
+        data = request.data
+        allowed = {'quantity', 'status'}
+        payload = {k: data[k] for k in allowed if k in data}
+        if not payload:
+            return Response(QrStandOrderDetailSerializer(order, context={'request': request}).data)
+        serializer = QrStandOrderUpdateSerializer(order, data=payload, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            order.refresh_from_db()
+            return Response(QrStandOrderDetailSerializer(order, context={'request': request}).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def qr_stand_order_pay(request, pk):
+    from .services import pay_qr_stand_order
+    try:
+        order = QrStandOrder.objects.select_related('restaurant').get(pk=pk)
+    except QrStandOrder.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        pay_qr_stand_order(order)
+    except Exception as e:
+        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    order.refresh_from_db()
+    serializer = QrStandOrderDetailSerializer(order, context={'request': request})
     return Response(serializer.data)

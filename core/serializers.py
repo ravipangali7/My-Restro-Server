@@ -362,3 +362,78 @@ class ShareholderWithdrawalDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = ShareholderWithdrawal
         fields = ['id', 'user', 'user_name', 'amount', 'status', 'remarks', 'reject_reason', 'created_at', 'updated_at']
+
+
+# --- QR Stand Order ---
+
+class QrStandOrderRestaurantMinSerializer(serializers.ModelSerializer):
+    """Minimal restaurant for QR stand order list/detail."""
+    logo_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Restaurant
+        fields = ['id', 'slug', 'name', 'phone', 'country_code', 'logo_url']
+
+    def get_logo_url(self, obj):
+        if not obj.logo:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.logo.url if hasattr(obj.logo, 'url') else str(obj.logo))
+
+
+class QrStandOrderListSerializer(serializers.ModelSerializer):
+    restaurant = QrStandOrderRestaurantMinSerializer(read_only=True)
+
+    class Meta:
+        model = QrStandOrder
+        fields = ['id', 'restaurant', 'quantity', 'total', 'status', 'payment_status', 'created_at']
+
+
+class QrStandOrderDetailSerializer(serializers.ModelSerializer):
+    restaurant = QrStandOrderRestaurantMinSerializer(read_only=True)
+
+    class Meta:
+        model = QrStandOrder
+        fields = ['id', 'restaurant', 'quantity', 'total', 'status', 'payment_status', 'created_at', 'updated_at']
+
+
+class QrStandOrderCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QrStandOrder
+        fields = ['restaurant', 'quantity']
+
+    def validate_quantity(self, value):
+        if value is None or value < 1:
+            raise serializers.ValidationError('Quantity must be at least 1.')
+        return value
+
+    def create(self, validated_data):
+        from decimal import Decimal
+        from .services import get_super_setting
+        quantity = validated_data['quantity']
+        ss = get_super_setting()
+        price = (ss.per_qr_stand_price or Decimal('0'))
+        total = Decimal(str(quantity)) * price
+        validated_data['total'] = total
+        return super().create(validated_data)
+
+
+class QrStandOrderUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QrStandOrder
+        fields = ['quantity', 'status']
+
+    def validate_quantity(self, value):
+        if value is not None and value < 1:
+            raise serializers.ValidationError('Quantity must be at least 1.')
+        return value
+
+    def update(self, instance, validated_data):
+        quantity = validated_data.get('quantity')
+        if quantity is not None:
+            from decimal import Decimal
+            from .services import get_super_setting
+            ss = get_super_setting()
+            price = (ss.per_qr_stand_price or Decimal('0'))
+            validated_data['total'] = Decimal(str(quantity)) * price
+        return super().update(instance, validated_data)

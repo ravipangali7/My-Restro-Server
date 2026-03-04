@@ -34,4 +34,9 @@ urlpatterns = [
     path('transactions/stats/', views.transaction_stats),
     path('transactions/', views.transaction_list),
     path('transactions/<int:pk>/', views.transaction_detail),
+    # QR Stand Orders (super admin)
+    path('qr-orders/stats/', views.qr_stand_order_stats),
+    path('qr-orders/', views.qr_stand_order_list),
+    path('qr-orders/<int:pk>/', views.qr_stand_order_detail),
+    path('qr-orders/<int:pk>/pay/', views.qr_stand_order_pay),
 ]
