@@ -2,6 +2,7 @@ from django.db.models import Q, Sum, Count
 from django.db.models.functions import TruncDate, TruncMonth
 from django.utils import timezone
 from datetime import timedelta
+from decimal import Decimal
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -19,8 +20,8 @@ from .models import (
     WithdrawalStatus,
     QrStandOrder,
     QrStandOrderStatus,
+    KycStatus,
 )
-from .models import KycStatus
 from .models import PaymentStatus
 from .permissions import IsSuperuser
 from .serializers import (
@@ -182,6 +183,35 @@ def owner_stats(request):
     })
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def owner_analytics(request):
+    owners = User.objects.filter(is_owner=True)
+    kyc_pending = owners.filter(kyc_status=KycStatus.PENDING).count()
+    kyc_approved = owners.filter(kyc_status=KycStatus.APPROVED).count()
+    kyc_rejected = owners.filter(kyc_status=KycStatus.REJECTED).count()
+    kyc_status_distribution = [
+        {'status': 'pending', 'count': kyc_pending},
+        {'status': 'approved', 'count': kyc_approved},
+        {'status': 'rejected', 'count': kyc_rejected},
+    ]
+    # Registration trend by month
+    reg_qs = owners.annotate(month_key=TruncMonth('created_at')).values('month_key').annotate(count=Count('id')).order_by('month_key')
+    registration_trend = []
+    for row in reg_qs:
+        mk = row['month_key']
+        month_str = mk.strftime('%Y-%m') if hasattr(mk, 'strftime') else str(mk)[:7]
+        registration_trend.append({'month': month_str, 'count': row['count']})
+    # Owner restaurant count (bar chart)
+    owner_count_qs = Restaurant.objects.values('user__name', 'user_id').annotate(restaurant_count=Count('id')).order_by('-restaurant_count')
+    owner_restaurant_count = [{'owner_name': r['user__name'] or f"User #{r['user_id']}", 'restaurant_count': r['restaurant_count']} for r in owner_count_qs]
+    return Response({
+        'kyc_status_distribution': kyc_status_distribution,
+        'registration_trend': registration_trend,
+        'owner_restaurant_count': owner_restaurant_count,
+    })
+
+
 # ---------- Restaurants ----------
 
 def _restaurant_queryset(request):
@@ -266,6 +296,42 @@ def restaurant_stats(request):
         'expired_subscription': expired,
         'total_due': str(total_due),
         'total_revenue': str(total_revenue),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def restaurant_analytics(request):
+    from django.utils import timezone as tz
+    today = tz.now().date()
+    qs = Restaurant.objects.all()
+    # Status distribution: active, inactive, expired
+    active = qs.filter(is_open=True).count()
+    inactive = qs.filter(is_open=False).count()
+    expired = qs.filter(subscription_end__lt=today).count()
+    status_distribution = [
+        {'status': 'active', 'count': active},
+        {'status': 'inactive', 'count': inactive},
+        {'status': 'expired', 'count': expired},
+    ]
+    # New restaurants growth by month
+    growth_qs = Restaurant.objects.annotate(month_key=TruncMonth('created_at')).values('month_key').annotate(count=Count('id')).order_by('month_key')
+    new_restaurants_growth = []
+    for row in growth_qs:
+        mk = row['month_key']
+        month_str = mk.strftime('%Y-%m') if hasattr(mk, 'strftime') else str(mk)[:7]
+        new_restaurants_growth.append({'month': month_str, 'count': row['count']})
+    # Balance comparison: top 10 and bottom 10
+    top10 = list(qs.order_by('-balance').values('name', 'balance')[:10])
+    bottom10 = list(qs.order_by('balance').values('name', 'balance')[:10])
+    balance_comparison = {
+        'top_10': [{'restaurant_name': r['name'], 'balance': float(r['balance'] or 0)} for r in top10],
+        'bottom_10': [{'restaurant_name': r['name'], 'balance': float(r['balance'] or 0)} for r in bottom10],
+    }
+    return Response({
+        'status_distribution': status_distribution,
+        'new_restaurants_growth': new_restaurants_growth,
+        'balance_comparison': balance_comparison,
     })
 
 
@@ -473,6 +539,37 @@ def shareholder_stats(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuser])
+def shareholder_analytics(request):
+    start_dt, end_dt = _parse_date_range(request)
+    # Earnings vs withdrawals from Transaction (share_distribution = distributed earnings, share_withdrawal = withdrawals)
+    txn_qs = Transaction.objects.filter(category__in=[TransactionCategory.SHARE_DISTRIBUTION, TransactionCategory.SHARE_WITHDRAWAL])
+    if start_dt is not None and end_dt is not None:
+        txn_qs = txn_qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
+    by_date = txn_qs.annotate(date_key=TruncDate('created_at')).values('date_key', 'category').annotate(amount=Sum('amount')).order_by('date_key')
+    from collections import defaultdict
+    by_date_agg = defaultdict(lambda: {'distributed_earnings': Decimal('0'), 'withdrawals': Decimal('0')})
+    for row in by_date:
+        d = str(row['date_key']) if row['date_key'] else ''
+        if row['category'] == TransactionCategory.SHARE_DISTRIBUTION:
+            by_date_agg[d]['distributed_earnings'] += row['amount'] or Decimal('0')
+        elif row['category'] == TransactionCategory.SHARE_WITHDRAWAL:
+            by_date_agg[d]['withdrawals'] += row['amount'] or Decimal('0')
+    earnings_vs_withdrawals = [{'date': k, 'distributed_earnings': float(v['distributed_earnings']), 'withdrawals': float(v['withdrawals'])} for k, v in sorted(by_date_agg.items())]
+    # Monthly payout trend (share_distribution + share_withdrawal by month)
+    monthly_qs = txn_qs.annotate(month_key=TruncMonth('created_at')).values('month_key').annotate(amount_paid=Sum('amount')).order_by('month_key')
+    monthly_payout_trend = []
+    for m in monthly_qs:
+        mk = m['month_key']
+        month_str = mk.strftime('%Y-%m') if hasattr(mk, 'strftime') else str(mk)[:7]
+        monthly_payout_trend.append({'month': month_str, 'amount_paid': float(m['amount_paid'] or 0)})
+    return Response({
+        'earnings_vs_withdrawals': earnings_vs_withdrawals,
+        'monthly_payout_trend': monthly_payout_trend,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
 def shareholder_withdrawal_history(request):
     user_id = request.query_params.get('user_id')
     if user_id:
@@ -489,9 +586,6 @@ def shareholder_withdrawal_history(request):
 @permission_classes([IsAuthenticated, IsSuperuser])
 def shareholder_withdrawal_stats(request):
     qs = ShareholderWithdrawal.objects.all()
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is not None and end_dt is not None:
-        qs = qs.filter(created_at__gte=start_dt, created_at__lte=end_dt)
     total_withdrawals = qs.count()
     pending_count = qs.filter(status=WithdrawalStatus.PENDING).count()
     approved_count = qs.filter(status=WithdrawalStatus.APPROVED).count()
@@ -509,6 +603,30 @@ def shareholder_withdrawal_stats(request):
         'pending_amount': str(pending_amount),
         'approved_amount': str(approved_amount),
         'failed_amount': str(failed_amount),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuser])
+def shareholder_withdrawal_analytics(request):
+    qs = ShareholderWithdrawal.objects.all()
+    start_dt, end_dt = _parse_date_range(request)
+    if start_dt is not None and end_dt is not None:
+        qs = qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
+    status_qs = qs.values('status').annotate(count=Count('id')).order_by('-count')
+    status_distribution = [{'status': s['status'], 'count': s['count']} for s in status_qs]
+    request_trend_qs = qs.annotate(date_key=TruncDate('created_at')).values('date_key').annotate(count=Count('id')).order_by('date_key')
+    request_trend = [{'date': str(r['date_key']), 'count': r['count']} for r in request_trend_qs]
+    monthly_qs = qs.annotate(month_key=TruncMonth('created_at')).values('month_key').annotate(total_amount=Sum('amount')).order_by('month_key')
+    monthly_amount = []
+    for row in monthly_qs:
+        mk = row['month_key']
+        month_str = mk.strftime('%Y-%m') if hasattr(mk, 'strftime') else str(mk)[:7]
+        monthly_amount.append({'month': month_str, 'total_amount': float(row['total_amount'] or 0)})
+    return Response({
+        'status_distribution': status_distribution,
+        'request_trend': request_trend,
+        'monthly_amount': monthly_amount,
     })
 
 
@@ -530,7 +648,7 @@ def shareholder_withdrawal_list(request):
         qs = ShareholderWithdrawal.objects.all().select_related('user').order_by('-created_at')
     start_dt, end_dt = _parse_date_range(request)
     if start_dt is not None and end_dt is not None:
-        qs = qs.filter(created_at__gte=start_dt, created_at__lte=end_dt)
+        qs = qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     serializer = ShareholderWithdrawalListSerializer(page, many=True, context={'request': request})
@@ -657,9 +775,6 @@ def qr_stand_order_price(request):
 @permission_classes([IsAuthenticated, IsSuperuser])
 def qr_stand_order_stats(request):
     qs = QrStandOrder.objects.all()
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is not None and end_dt is not None:
-        qs = qs.filter(created_at__gte=start_dt, created_at__lte=end_dt)
     total_orders = qs.count()
     pending = qs.filter(status=QrStandOrderStatus.PENDING).count()
     accepted = qs.filter(status=QrStandOrderStatus.ACCEPTED).count()
@@ -687,12 +802,12 @@ def qr_stand_order_list(request):
             return Response(out_serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     qs = QrStandOrder.objects.select_related('restaurant').order_by('-created_at')
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is not None and end_dt is not None:
-        qs = qs.filter(created_at__gte=start_dt, created_at__lte=end_dt)
     status_filter = request.query_params.get('status', '').strip().lower()
     if status_filter in ('pending', 'accepted', 'shipped', 'delivered'):
         qs = qs.filter(status=status_filter)
+    start_dt, end_dt = _parse_date_range(request)
+    if start_dt is not None and end_dt is not None:
+        qs = qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     serializer = QrStandOrderListSerializer(page, many=True, context={'request': request})
@@ -744,234 +859,52 @@ def qr_stand_order_pay(request, pk):
     return Response(serializer.data)
 
 
-# ---------- Chart / Analytics endpoints ----------
-
-def _qr_order_queryset(request):
-    qs = QrStandOrder.objects.select_related('restaurant')
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is not None and end_dt is not None:
-        qs = qs.filter(created_at__gte=start_dt, created_at__lte=end_dt)
-    status_filter = request.query_params.get('status', '').strip().lower()
-    if status_filter in ('pending', 'accepted', 'shipped', 'delivered'):
-        qs = qs.filter(status=status_filter)
-    return qs
-
-
-def _use_month_bucket(request):
-    """Use month bucket if range > 31 days or no range (all time)."""
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is None or end_dt is None:
-        return True
-    return (end_dt - start_dt).days > 31
-
+# ---------- QR Stand Order Analytics (reports) ----------
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuser])
-def qr_orders_chart_orders_trend(request):
-    qs = _qr_order_queryset(request)
-    use_month = _use_month_bucket(request)
-    trunc = TruncMonth('created_at') if use_month else TruncDate('created_at')
-    qs = qs.annotate(bucket=trunc).values('bucket').annotate(
+def qr_stand_order_analytics(request):
+    qs = QrStandOrder.objects.all().select_related('restaurant')
+    start_dt, end_dt = _parse_date_range(request)
+    if start_dt is not None and end_dt is not None:
+        qs = qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
+    group_by = (request.query_params.get('group_by') or 'day').strip().lower()
+    if group_by == 'month':
+        date_expr = TruncMonth('created_at')
+    else:
+        date_expr = TruncDate('created_at')
+    # Orders trend: by date, total + delivered + pending
+    trend_qs = qs.annotate(date_key=date_expr).values('date_key').annotate(
         total_orders=Count('id'),
         delivered=Count('id', filter=Q(status__in=[QrStandOrderStatus.SHIPPED, QrStandOrderStatus.DELIVERED])),
         pending=Count('id', filter=Q(status=QrStandOrderStatus.PENDING)),
-    ).order_by('bucket')
-    series = []
-    for row in qs:
-        key = row['bucket']
-        if key:
-            date_str = key.strftime('%Y-%m-%d') if not use_month else key.strftime('%Y-%m')
-            series.append({
-                'date': date_str,
-                'total_orders': row['total_orders'],
-                'delivered': row['delivered'],
-                'pending': row['pending'],
-            })
-    return Response({'series': series})
+    ).order_by('date_key')
+    def _date_str(obj):
+        if obj is None:
+            return ''
+        if hasattr(obj, 'strftime'):
+            return obj.strftime('%Y-%m-%d') if hasattr(obj, 'date') and callable(getattr(obj, 'date')) else obj.strftime('%Y-%m-%d')
+        return str(obj)[:10]
 
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
-def qr_orders_chart_revenue_trend(request):
-    qs = _qr_order_queryset(request).filter(payment_status__in=[PaymentStatus.PAID, PaymentStatus.SUCCESS])
-    use_month = _use_month_bucket(request)
-    trunc = TruncMonth('created_at') if use_month else TruncDate('created_at')
-    qs = qs.annotate(bucket=trunc).values('bucket').annotate(revenue=Sum('total')).order_by('bucket')
-    series = []
-    for row in qs:
-        if row['bucket']:
-            date_str = row['bucket'].strftime('%Y-%m-%d') if not use_month else row['bucket'].strftime('%Y-%m')
-            series.append({'date': date_str, 'revenue': float(row['revenue'] or 0)})
-    return Response({'series': series})
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
-def qr_orders_chart_order_status_distribution(request):
-    qs = _qr_order_queryset(request)
-    segments = []
-    for status_val, label in [
-        (QrStandOrderStatus.PENDING, 'Pending'),
-        (QrStandOrderStatus.ACCEPTED, 'Accepted'),
-        (QrStandOrderStatus.SHIPPED, 'Shipped'),
-        (QrStandOrderStatus.DELIVERED, 'Delivered'),
-    ]:
-        cnt = qs.filter(status=status_val).count()
-        segments.append({'name': label, 'value': cnt})
-    return Response({'segments': segments})
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
-def qr_orders_chart_restaurant_orders(request):
-    qs = _qr_order_queryset(request).values('restaurant__name').annotate(value=Count('id')).order_by('-value')[:20]
-    items = [{'name': row['restaurant__name'] or '—', 'value': row['value']} for row in qs]
-    return Response({'items': items})
-
-
-def _withdrawal_queryset(request):
-    qs = ShareholderWithdrawal.objects.all()
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is not None and end_dt is not None:
-        qs = qs.filter(created_at__gte=start_dt, created_at__lte=end_dt)
-    return qs
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
-def withdrawals_chart_request_trend(request):
-    qs = _withdrawal_queryset(request)
-    use_month = _use_month_bucket(request)
-    trunc = TruncMonth('created_at') if use_month else TruncDate('created_at')
-    qs = qs.annotate(bucket=trunc).values('bucket').annotate(count=Count('id')).order_by('bucket')
-    series = [
-        {'date': row['bucket'].strftime('%Y-%m-%d' if not use_month else '%Y-%m'), 'count': row['count']}
-        for row in qs if row['bucket']
+    orders_trend = [
+        {'date': _date_str(t['date_key']), 'total_orders': t['total_orders'], 'delivered': t['delivered'], 'pending': t['pending']}
+        for t in trend_qs
     ]
-    return Response({'series': series})
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
-def withdrawals_chart_monthly_amount(request):
-    qs = _withdrawal_queryset(request).filter(status=WithdrawalStatus.APPROVED)
-    qs = qs.annotate(bucket=TruncMonth('created_at')).values('bucket').annotate(amount=Sum('amount')).order_by('bucket')
-    series = [{'month': row['bucket'].strftime('%Y-%m'), 'amount': float(row['amount'] or 0)} for row in qs if row['bucket']]
-    return Response({'series': series})
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
-def shareholder_chart_earnings_withdrawals_trend(request):
-    start_dt, end_dt = _parse_date_range(request)
-    txn_qs = Transaction.objects.filter(transaction_type=TransactionType.IN)
-    if start_dt and end_dt:
-        txn_qs = txn_qs.filter(created_at__gte=start_dt, created_at__lte=end_dt)
-    use_month = (end_dt and start_dt and (end_dt - start_dt).days > 31) or not start_dt
-    trunc = TruncMonth('created_at') if use_month else TruncDate('created_at')
-    earnings = txn_qs.filter(category=TransactionCategory.SHARE_DISTRIBUTION).annotate(
-        bucket=trunc
-    ).values('bucket').annotate(distributed_earnings=Sum('amount')).order_by('bucket')
-    withdrawals = ShareholderWithdrawal.objects.filter(status=WithdrawalStatus.APPROVED)
-    if start_dt and end_dt:
-        withdrawals = withdrawals.filter(created_at__gte=start_dt, created_at__lte=end_dt)
-    w_qs = withdrawals.annotate(bucket=trunc).values('bucket').annotate(withdrawals=Sum('amount')).order_by('bucket')
-    earnings_map = {row['bucket'].strftime('%Y-%m-%d' if not use_month else '%Y-%m'): float(row['distributed_earnings'] or 0) for row in earnings if row['bucket']}
-    withdrawals_map = {row['bucket'].strftime('%Y-%m-%d' if not use_month else '%Y-%m'): float(row['withdrawals'] or 0) for row in w_qs if row['bucket']}
-    all_dates = sorted(set(earnings_map) | set(withdrawals_map))
-    series = [{'date': d, 'distributed_earnings': earnings_map.get(d, 0), 'withdrawals': withdrawals_map.get(d, 0)} for d in all_dates]
-    return Response({'series': series})
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
-def shareholder_chart_monthly_payout_trend(request):
-    start_dt, end_dt = _parse_date_range(request)
-    qs = Transaction.objects.filter(
-        transaction_type='in', category=TransactionCategory.SHARE_DISTRIBUTION
-    )
-    if start_dt and end_dt:
-        qs = qs.filter(created_at__gte=start_dt, created_at__lte=end_dt)
-    qs = qs.annotate(bucket=TruncMonth('created_at')).values('bucket').annotate(
-        amount_paid=Sum('amount')
-    ).order_by('bucket')
-    series = [{'month': row['bucket'].strftime('%Y-%m'), 'amount_paid': float(row['amount_paid'] or 0)} for row in qs if row['bucket']]
-    return Response({'series': series})
-
-
-def _restaurant_chart_queryset(request):
-    qs = Restaurant.objects.all()
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is not None and end_dt is not None:
-        qs = qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
-    return qs
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
-def restaurant_chart_status_distribution(request):
-    qs = Restaurant.objects.all()
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is not None and end_dt is not None:
-        qs = qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
-    from django.utils import timezone as tz
-    today = tz.now().date()
-    active = qs.filter(is_open=True).count()
-    inactive = qs.filter(is_open=False).count()
-    expired = qs.filter(subscription_end__lt=today).count()
-    segments = [{'name': 'Active', 'value': active}, {'name': 'Inactive', 'value': inactive}, {'name': 'Expired', 'value': expired}]
-    return Response({'segments': segments})
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
-def restaurant_chart_new_restaurants_growth(request):
-    qs = _restaurant_chart_queryset(request)
-    qs = qs.annotate(bucket=TruncMonth('created_at')).values('bucket').annotate(count=Count('id')).order_by('bucket')
-    series = [{'month': row['bucket'].strftime('%Y-%m'), 'count': row['count']} for row in qs if row['bucket']]
-    return Response({'series': series})
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
-def restaurant_chart_balance_comparison(request):
-    qs = Restaurant.objects.all().order_by('-balance').values('name', 'balance')[:10]
-    top = [{'name': row['name'] or '—', 'value': float(row['balance'] or 0)} for row in qs]
-    qs_bottom = Restaurant.objects.all().order_by('balance').values('name', 'balance')[:10]
-    bottom = [{'name': row['name'] or '—', 'value': float(row['balance'] or 0)} for row in qs_bottom]
-    return Response({'top': top, 'bottom': bottom})
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
-def owner_chart_kyc_distribution(request):
-    from .models import KycStatus
-    owners = User.objects.filter(is_owner=True)
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is not None and end_dt is not None:
-        owners = owners.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
-    pending = owners.filter(kyc_status='pending').count()
-    approved = owners.filter(kyc_status=KycStatus.APPROVED).count()
-    rejected = owners.filter(kyc_status=KycStatus.REJECTED).count()
-    segments = [{'name': 'Pending', 'value': pending}, {'name': 'Approved', 'value': approved}, {'name': 'Rejected', 'value': rejected}]
-    return Response({'segments': segments})
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
-def owner_chart_registration_trend(request):
-    qs = User.objects.filter(is_owner=True)
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is not None and end_dt is not None:
-        qs = qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
-    qs = qs.annotate(bucket=TruncMonth('created_at')).values('bucket').annotate(count=Count('id')).order_by('bucket')
-    series = [{'month': row['bucket'].strftime('%Y-%m'), 'count': row['count']} for row in qs if row['bucket']]
-    return Response({'series': series})
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
-def owner_chart_owner_restaurant_count(request):
-    qs = User.objects.filter(is_owner=True).annotate(restaurant_count=Count('restaurants')).order_by('-restaurant_count')[:15]
-    items = [{'name': (u.name or str(u.phone) or '—'), 'value': u.restaurant_count} for u in qs]
-    return Response({'items': items})
+    # Revenue trend
+    rev_qs = qs.filter(payment_status__in=[PaymentStatus.PAID, PaymentStatus.SUCCESS]).annotate(date_key=date_expr).values('date_key').annotate(revenue=Sum('total')).order_by('date_key')
+    revenue_trend = [
+        {'date': _date_str(r['date_key']), 'revenue': float(r['revenue'] or 0)}
+        for r in rev_qs
+    ]
+    # Order status distribution
+    status_qs = qs.values('status').annotate(count=Count('id')).order_by('-count')
+    order_status_distribution = [{'status': s['status'], 'count': s['count']} for s in status_qs]
+    # Restaurant-wise orders
+    rest_qs = qs.values('restaurant__name').annotate(count=Count('id')).order_by('-count')
+    restaurant_orders = [{'restaurant_name': r['restaurant__name'] or '—', 'count': r['count']} for r in rest_qs]
+    return Response({
+        'orders_trend': orders_trend,
+        'revenue_trend': revenue_trend,
+        'order_status_distribution': order_status_distribution,
+        'restaurant_orders': restaurant_orders,
+    })
