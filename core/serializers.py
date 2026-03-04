@@ -187,7 +187,7 @@ class RestaurantListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'slug', 'name', 'phone', 'country_code', 'address',
             'balance', 'due_balance', 'subscription_start', 'subscription_end',
-            'is_open', 'created_at', 'owner_name', 'logo_url', 'user',
+            'is_open', 'created_at', 'owner_name', 'logo_url', 'is_active', 'user',
         ]
 
     def get_owner_name(self, obj):
