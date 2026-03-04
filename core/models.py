@@ -994,9 +994,7 @@ class BulkNotification(models.Model):
         Restaurant, on_delete=models.CASCADE, related_name='bulk_notifications'
     )
     message = models.TextField()
-    customers = models.ManyToManyField(
-        Customer, related_name='bulk_notifications', blank=True
-    )
+    receivers = models.JSONField(default=list, blank=True)
     image = models.ImageField(upload_to='notifications/', blank=True, null=True)
     type = models.CharField(
         max_length=20, choices=BulkNotificationType.choices

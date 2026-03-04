@@ -433,5 +433,4 @@ class BulkNotificationAdmin(admin.ModelAdmin):
     list_filter = ('restaurant', 'type')
     search_fields = ('message',)
     autocomplete_fields = ('restaurant',)
-    filter_horizontal = ('customers',)
     readonly_fields = ('created_at', 'updated_at')
