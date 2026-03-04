@@ -70,6 +70,25 @@ def me(request):
     if 'image' in data:
         user.image = data['image']
         updated = True
+    # Optional: update phone and country_code (validate uniqueness)
+    new_phone = data.get('phone')
+    new_country_code = data.get('country_code')
+    if new_phone is not None or new_country_code is not None:
+        cc = (new_country_code or getattr(user, 'country_code', '') or '').strip()
+        ph = (new_phone or getattr(user, 'phone', '') or '').strip()
+        if not ph:
+            return Response(
+                {'detail': 'Phone number is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if User.objects.filter(country_code=cc, phone=ph).exclude(pk=user.pk).exists():
+            return Response(
+                {'detail': 'A user with this phone number already exists.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        user.country_code = cc
+        user.phone = ph
+        updated = True
     current_password = data.get('current_password')
     new_password = data.get('new_password')
     if current_password is not None and new_password is not None:
