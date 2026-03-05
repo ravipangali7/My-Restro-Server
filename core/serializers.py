@@ -614,6 +614,16 @@ class BulkNotificationDetailSerializer(serializers.ModelSerializer):
                         entry['name'] = cust.name or ''
                         entry['country_code'] = cust.country_code or ''
                         entry['phone'] = cust.phone or ''
+                elif rtype == 'vendor':
+                    vendor = Vendor.objects.filter(pk=rid).first()
+                    if vendor:
+                        entry['name'] = vendor.name or ''
+                        entry['country_code'] = vendor.country_code or ''
+                        entry['phone'] = vendor.phone or ''
+                        if vendor.image:
+                            entry['image_url'] = _build_media_url(
+                                request, vendor.image.url if hasattr(vendor.image, 'url') else str(vendor.image)
+                            )
             except Exception:
                 pass
             expanded.append(entry)
@@ -632,7 +642,7 @@ class BulkNotificationCreateUpdateSerializer(serializers.ModelSerializer):
             if not isinstance(r, dict) or 'type' not in r or 'id' not in r:
                 raise serializers.ValidationError('Each receiver must have type and id.')
             t = (r.get('type') or '').strip().lower()
-            if t not in ('restaurant', 'owner', 'customer', 'shareholder'):
+            if t not in ('restaurant', 'owner', 'customer', 'shareholder', 'vendor'):
                 raise serializers.ValidationError(f'Invalid receiver type: {t}')
         request = self.context.get('request')
         if request and getattr(request.user, 'is_owner', False) and not getattr(request.user, 'is_superuser', False):
