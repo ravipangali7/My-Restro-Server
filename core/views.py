@@ -500,26 +500,18 @@ def owner_dashboard_stats(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_staff_available_users(request):
-    """List users that can be assigned as staff (is_restaurant_staff). Optional search and restaurant_id to exclude already-assigned."""
+    """List users that can be assigned as staff: only Customers or unassigned (no Staff row anywhere). Search by phone required."""
     owner_ids = _owner_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'results': []})
     search = (request.query_params.get('search') or '').strip()
-    restaurant_id = request.query_params.get('restaurant_id')
-    try:
-        rid = int(restaurant_id) if restaurant_id else None
-    except ValueError:
-        rid = None
-    if rid is not None and rid not in owner_ids:
-        rid = None
-    qs = User.objects.filter(is_restaurant_staff=True).exclude(is_superuser=True).order_by('name', 'phone')
-    if search:
-        qs = qs.filter(Q(name__icontains=search) | Q(phone__icontains=search))
-    if rid is not None:
-        already_staff_ids = list(Staff.objects.filter(restaurant_id=rid).values_list('user_id', flat=True))
-        if already_staff_ids:
-            qs = qs.exclude(id__in=already_staff_ids)
-    qs = qs[:100]
+    if not search:
+        return Response({'results': []})
+    already_staff_user_ids = list(Staff.objects.values_list('user_id', flat=True).distinct())
+    qs = User.objects.exclude(is_superuser=True).order_by('name', 'phone')
+    if already_staff_user_ids:
+        qs = qs.exclude(id__in=already_staff_user_ids)
+    qs = qs.filter(phone__icontains=search)[:100]
     results = [{'id': u.id, 'name': u.name or '', 'phone': u.phone or ''} for u in qs]
     return Response({'results': results})
 

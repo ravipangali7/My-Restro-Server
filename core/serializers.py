@@ -721,6 +721,14 @@ class OwnerStaffCreateUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('You can only add staff to your own restaurants.')
         return value
 
+    def validate_user(self, value):
+        instance = self.instance
+        if instance is not None and instance.user_id == value.id:
+            return value
+        if Staff.objects.filter(user=value).exists():
+            raise serializers.ValidationError('This user is already staff at a restaurant.')
+        return value
+
     def validate(self, attrs):
         from decimal import Decimal
         monthly = attrs.pop('monthly_salary', None)
