@@ -4,8 +4,10 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.authtoken.models import Token
 
-from .models import User
+from .models import User, Customer
 from .serializers import UserSerializer
+
+MIN_PASSWORD_LENGTH = 6
 
 
 @api_view(['POST'])
@@ -49,6 +51,84 @@ def login(request):
         'token': token.key,
         'user': UserSerializer(user).data,
     })
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def register(request):
+    """
+    POST body: { "name": "...", "country_code": "+91", "phone": "...", "password": "..." }
+    Creates a customer-only User (no owner/staff/shareholder). Optionally links a Customer row.
+    Returns: { "token": "<key>", "user": {...} } for auto-login, or 400 with detail.
+    """
+    name = (request.data.get('name') or '').strip()
+    country_code = (request.data.get('country_code') or '').strip()
+    phone = (request.data.get('phone') or '').strip()
+    password = request.data.get('password')
+
+    if not name:
+        return Response(
+            {'detail': 'Name is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if not country_code:
+        return Response(
+            {'detail': 'Country code is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if not phone:
+        return Response(
+            {'detail': 'Phone number is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if not password:
+        return Response(
+            {'detail': 'Password is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if len(password) < MIN_PASSWORD_LENGTH:
+        return Response(
+            {'detail': f'Password must be at least {MIN_PASSWORD_LENGTH} characters.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if User.objects.filter(country_code=country_code, phone=phone).exists():
+        return Response(
+            {'detail': 'A user with this phone number already exists.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    username = (country_code or '') + (phone or '')
+    user = User(
+        username=username,
+        name=name,
+        country_code=country_code,
+        phone=phone,
+        is_owner=False,
+        is_restaurant_staff=False,
+        is_shareholder=False,
+    )
+    user.set_password(password)
+    user.save()
+
+    customer = Customer.objects.filter(country_code=country_code, phone=phone).first()
+    if customer:
+        customer.user = user
+        customer.name = name
+        customer.save(update_fields=['user', 'name'])
+    else:
+        Customer.objects.create(
+            user=user,
+            name=name,
+            phone=phone,
+            country_code=country_code,
+        )
+
+    token, _ = Token.objects.get_or_create(user=user)
+    return Response({
+        'token': token.key,
+        'user': UserSerializer(user).data,
+    }, status=status.HTTP_201_CREATED)
 
 
 @api_view(['GET', 'PATCH'])

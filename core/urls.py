@@ -4,6 +4,7 @@ from . import views
 
 urlpatterns = [
     path('auth/login/', auth_views.login),
+    path('auth/register/', auth_views.register),
     path('auth/me/', auth_views.me),
     path('auth/logout/', auth_views.logout),
     # Owner (scoped dashboard and lists)
