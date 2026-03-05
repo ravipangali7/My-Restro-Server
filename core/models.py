@@ -268,7 +268,6 @@ class Vendor(models.Model):
     restaurant = models.ForeignKey(
         Restaurant, on_delete=models.CASCADE, related_name='vendors'
     )
-    role = models.CharField(max_length=100, blank=True)
     phone = models.CharField(max_length=20, blank=True)
     country_code = models.CharField(max_length=10, blank=True)
     image = models.ImageField(upload_to='vendors/', blank=True, null=True)
