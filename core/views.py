@@ -1514,7 +1514,7 @@ def super_settings_fee_income(request):
 # ---------- QR Stand Order ----------
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def qr_stand_order_price(request):
     """Return per_qr_stand_price from SuperSetting for real-time total calculation in add form."""
     from .services import get_super_setting
@@ -1524,9 +1524,12 @@ def qr_stand_order_price(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def qr_stand_order_stats(request):
     qs = QrStandOrder.objects.all()
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None:
+        qs = qs.filter(restaurant_id__in=owner_ids)
     total_orders = qs.count()
     pending = qs.filter(status=QrStandOrderStatus.PENDING).count()
     accepted = qs.filter(status=QrStandOrderStatus.ACCEPTED).count()
@@ -1543,7 +1546,7 @@ def qr_stand_order_stats(request):
 
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def qr_stand_order_list(request):
     if request.method == 'POST':
         serializer = QrStandOrderCreateSerializer(data=request.data)
@@ -1554,6 +1557,9 @@ def qr_stand_order_list(request):
             return Response(out_serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     qs = QrStandOrder.objects.select_related('restaurant').order_by('-created_at')
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None:
+        qs = qs.filter(restaurant_id__in=owner_ids)
     status_filter = request.query_params.get('status', '').strip().lower()
     if status_filter in ('pending', 'accepted', 'shipped', 'delivered'):
         qs = qs.filter(status=status_filter)
@@ -1567,11 +1573,14 @@ def qr_stand_order_list(request):
 
 
 @api_view(['GET', 'PATCH', 'PUT', 'DELETE'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def qr_stand_order_detail(request, pk):
     try:
         order = QrStandOrder.objects.select_related('restaurant').get(pk=pk)
     except QrStandOrder.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None and order.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'GET':
         serializer = QrStandOrderDetailSerializer(order, context={'request': request})
@@ -1595,12 +1604,15 @@ def qr_stand_order_detail(request, pk):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def qr_stand_order_pay(request, pk):
     from .services import pay_qr_stand_order
     try:
         order = QrStandOrder.objects.select_related('restaurant').get(pk=pk)
     except QrStandOrder.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None and order.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     try:
         pay_qr_stand_order(order)
@@ -1614,9 +1626,12 @@ def qr_stand_order_pay(request, pk):
 # ---------- QR Stand Order Analytics (reports) ----------
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def qr_stand_order_analytics(request):
     qs = QrStandOrder.objects.all().select_related('restaurant')
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None:
+        qs = qs.filter(restaurant_id__in=owner_ids)
     start_dt, end_dt = _parse_date_range(request)
     if start_dt is not None and end_dt is not None:
         qs = qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
@@ -1680,7 +1695,7 @@ def _notification_data(request):
 
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def notification_list(request):
     if request.method == 'POST':
         data = _notification_data(request)
@@ -1696,6 +1711,9 @@ def notification_list(request):
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     qs = BulkNotification.objects.select_related('restaurant').order_by('-created_at')
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None:
+        qs = qs.filter(restaurant_id__in=owner_ids)
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(message__icontains=search)
@@ -1709,11 +1727,14 @@ def notification_list(request):
 
 
 @api_view(['GET', 'PATCH', 'PUT'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def notification_detail(request, pk):
     try:
         obj = BulkNotification.objects.select_related('restaurant').get(pk=pk)
     except BulkNotification.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None and obj.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'GET':
         serializer = BulkNotificationDetailSerializer(obj, context={'request': request})
@@ -1732,11 +1753,14 @@ def notification_detail(request, pk):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def notification_send(request, pk):
     try:
         obj = BulkNotification.objects.select_related('restaurant').get(pk=pk)
     except BulkNotification.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None and obj.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     total = len(obj.receivers or [])
     if total == 0:
@@ -1748,10 +1772,13 @@ def notification_send(request, pk):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def notification_stats(request):
     """Return total, sms, whatsapp counts for BulkNotification."""
     qs = BulkNotification.objects.all()
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None:
+        qs = qs.filter(restaurant_id__in=owner_ids)
     total = qs.count()
     sms = qs.filter(type='sms').count()
     whatsapp = qs.filter(type='whatsapp').count()
