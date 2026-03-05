@@ -634,6 +634,14 @@ class BulkNotificationCreateUpdateSerializer(serializers.ModelSerializer):
             t = (r.get('type') or '').strip().lower()
             if t not in ('restaurant', 'owner', 'customer', 'shareholder'):
                 raise serializers.ValidationError(f'Invalid receiver type: {t}')
+        request = self.context.get('request')
+        if request and getattr(request.user, 'is_owner', False) and not getattr(request.user, 'is_superuser', False):
+            for r in value:
+                t = (r.get('type') or '').strip().lower()
+                if t in ('owner', 'shareholder'):
+                    raise serializers.ValidationError(
+                        'Owners cannot send notifications to Owners or Shareholders.'
+                    )
         return value
 
     def validate_type(self, value):
