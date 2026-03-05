@@ -1,4 +1,6 @@
 from django.db.models import Q, Sum, Count
+from django.db.models.functions import Coalesce
+from django.db.models import Value
 from django.db.models.functions import TruncDate, TruncMonth
 from django.utils import timezone
 from datetime import timedelta
@@ -23,9 +25,16 @@ from .models import (
     KycStatus,
     BulkNotification,
     Customer,
+    Staff,
+    Vendor,
+    Order,
+    CustomerRestaurant,
+    Attendance,
+    PaidRecord,
+    AttendanceStatus,
 )
 from .models import PaymentStatus
-from .permissions import IsSuperuser
+from .permissions import IsSuperuser, IsSuperuserOrOwner
 from .serializers import (
     OwnerSerializer,
     OwnerCreateUpdateSerializer,
@@ -51,6 +60,8 @@ from .serializers import (
     BulkNotificationDetailSerializer,
     BulkNotificationCreateUpdateSerializer,
     CustomerListSerializer,
+    OwnerStaffListSerializer,
+    OwnerVendorListSerializer,
 )
 
 
@@ -58,6 +69,13 @@ class StandardPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
     max_page_size = 100
+
+
+def _owner_restaurant_ids(request):
+    """Return list of restaurant IDs for request.user when owner; else None (no filter)."""
+    if not getattr(request.user, 'is_owner', False):
+        return None
+    return list(Restaurant.objects.filter(user=request.user).values_list('id', flat=True))
 
 
 def _parse_date_range(request):
@@ -222,8 +240,12 @@ def owner_analytics(request):
 
 # ---------- Restaurants ----------
 
-def _restaurant_queryset(request):
+def _restaurant_queryset(request, restrict_to_owner=True):
     qs = Restaurant.objects.all().select_related('user').order_by('-created_at')
+    if restrict_to_owner:
+        owner_ids = _owner_restaurant_ids(request)
+        if owner_ids is not None:
+            qs = qs.filter(id__in=owner_ids)
     if request.query_params.get('has_due') == 'true':
         qs = qs.filter(due_balance__gt=0)
     if request.query_params.get('subscription_expired') == 'true':
@@ -245,7 +267,7 @@ def _restaurant_queryset(request):
 
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def restaurant_list(request):
     if request.method == 'POST':
         serializer = RestaurantCreateUpdateSerializer(data=request.data, context={'request': request})
@@ -288,9 +310,12 @@ def restaurant_detail(request, pk):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def restaurant_stats(request):
     qs = Restaurant.objects.all()
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None:
+        qs = qs.filter(id__in=owner_ids)
     total = qs.count()
     active = qs.filter(is_open=True).count()
     inactive = qs.filter(is_open=False).count()
@@ -347,10 +372,13 @@ def restaurant_analytics(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def due_stats(request):
     """Stats for Due listing: total due count/amount, over threshold, outstanding."""
     qs_with_due = Restaurant.objects.filter(due_balance__gt=0)
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None:
+        qs_with_due = qs_with_due.filter(id__in=owner_ids)
     total_due_count = qs_with_due.count()
     total_due_amount = qs_with_due.aggregate(s=Sum('due_balance'))['s'] or 0
     try:
@@ -358,7 +386,7 @@ def due_stats(request):
         threshold = (ss.due_threshold or 0) if ss else 0
     except Exception:
         threshold = 0
-    over_threshold_qs = Restaurant.objects.filter(due_balance__gt=threshold) if threshold else qs_with_due
+    over_threshold_qs = qs_with_due.filter(due_balance__gt=threshold) if threshold else qs_with_due
     over_threshold_count = over_threshold_qs.count()
     over_threshold_amount = over_threshold_qs.aggregate(s=Sum('due_balance'))['s'] or 0
     return Response({
@@ -368,6 +396,443 @@ def due_stats(request):
         'over_threshold_amount': str(over_threshold_amount),
         'outstanding_count': total_due_count,
         'outstanding_amount': str(total_due_amount),
+    })
+
+
+# ---------- Owner (dashboard & scoped data) ----------
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_dashboard_stats(request):
+    """Owner-scoped dashboard: restaurants count, staff count, revenue, due, recent activity."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None:
+        return Response({'detail': 'Not available for superuser. Use dashboard-stats.'}, status=status.HTTP_403_FORBIDDEN)
+    if not owner_ids:
+        return Response({
+            'restaurants_count': 0,
+            'staff_count': 0,
+            'total_revenue': '0',
+            'total_due': '0',
+            'active_restaurants': 0,
+            'recent_transactions': [],
+        })
+    qs_rest = Restaurant.objects.filter(id__in=owner_ids)
+    restaurants_count = qs_rest.count()
+    active_restaurants = qs_rest.filter(is_open=True).count()
+    total_due = qs_rest.aggregate(s=Sum('due_balance'))['s'] or Decimal('0')
+    total_revenue = qs_rest.aggregate(s=Sum('balance'))['s'] or Decimal('0')
+    staff_count = Staff.objects.filter(restaurant_id__in=owner_ids).count()
+    recent = Transaction.objects.filter(restaurant_id__in=owner_ids).order_by('-created_at')[:10]
+    recent_data = [
+        {
+            'id': t.id,
+            'reference': getattr(t, 'reference', ''),
+            'amount': str(t.amount),
+            'transaction_type': getattr(t, 'transaction_type', ''),
+            'category': getattr(t, 'category', ''),
+            'payment_status': getattr(t, 'payment_status', ''),
+            'created_at': t.created_at.isoformat() if hasattr(t.created_at, 'isoformat') else str(t.created_at),
+        }
+        for t in recent
+    ]
+    return Response({
+        'restaurants_count': restaurants_count,
+        'staff_count': staff_count,
+        'total_revenue': str(total_revenue),
+        'total_due': str(total_due),
+        'active_restaurants': active_restaurants,
+        'recent_transactions': recent_data,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_staff_list(request):
+    """List staff for owner's restaurants; search, pagination, filter active/inactive."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    qs = Staff.objects.filter(restaurant_id__in=owner_ids).select_related('user', 'restaurant').order_by('restaurant__name', 'user__name')
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(
+            Q(user__name__icontains=search) | Q(user__phone__icontains=search)
+        )
+    status_filter = request.query_params.get('status', '').strip().lower()
+    if status_filter == 'active':
+        qs = qs.filter(is_suspend=False)
+    elif status_filter == 'inactive':
+        qs = qs.filter(is_suspend=True)
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = OwnerStaffListSerializer(page, many=True, context={'request': request})
+    return paginator.get_paginated_response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_staff_stats(request):
+    """Total, active, inactive staff and total due for owner's restaurants."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'total': 0, 'active': 0, 'inactive': 0, 'total_due': '0'})
+    qs = Staff.objects.filter(restaurant_id__in=owner_ids)
+    total = qs.count()
+    active = qs.filter(is_suspend=False).count()
+    inactive = qs.filter(is_suspend=True).count()
+    total_due = qs.aggregate(s=Sum('to_pay'))['s'] or Decimal('0')
+    return Response({
+        'total': total,
+        'active': active,
+        'inactive': inactive,
+        'total_due': str(total_due),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_customers_list(request):
+    """List customers with orders in owner's restaurants; total_orders, total_spent, credit_due."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    qs = Customer.objects.filter(orders__restaurant_id__in=owner_ids).distinct().annotate(
+        total_orders=Count('orders'),
+        total_spent=Coalesce(Sum('orders__total'), Value(Decimal('0'))),
+    ).order_by('-total_spent')
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(name__icontains=search) | Q(phone__icontains=search))
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    results = []
+    for c in page:
+        credit_qs = CustomerRestaurant.objects.filter(customer=c, restaurant_id__in=owner_ids).aggregate(s=Sum('to_pay'))
+        credit_due = credit_qs['s'] or Decimal('0')
+        results.append({
+            'id': c.id,
+            'name': c.name,
+            'phone': c.phone,
+            'country_code': getattr(c, 'country_code', ''),
+            'total_orders': getattr(c, 'total_orders', 0),
+            'total_spent': str(getattr(c, 'total_spent', 0)),
+            'credit_due': str(credit_due),
+        })
+    return paginator.get_paginated_response(results)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_customers_stats(request):
+    """Total customers, VIP count (e.g. 50+ orders), credit_due sum for owner scope."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'total': 0, 'vip_count': 0, 'credit_due': '0'})
+    qs = Customer.objects.filter(orders__restaurant_id__in=owner_ids).distinct().annotate(
+        order_count=Count('orders'),
+        total_spent=Coalesce(Sum('orders__total'), Value(Decimal('0'))),
+    )
+    total = qs.count()
+    vip_count = sum(1 for c in qs if getattr(c, 'order_count', 0) >= 50)
+    credit_agg = CustomerRestaurant.objects.filter(restaurant_id__in=owner_ids).aggregate(s=Sum('to_pay'))
+    credit_due = credit_agg['s'] or Decimal('0')
+    return Response({
+        'total': total,
+        'vip_count': vip_count,
+        'credit_due': str(credit_due),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_vendors_list(request):
+    """List vendors for owner's restaurants; search, pagination."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    qs = Vendor.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant').order_by('name')
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(name__icontains=search) | Q(phone__icontains=search))
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = OwnerVendorListSerializer(page, many=True, context={'request': request})
+    return paginator.get_paginated_response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_vendors_stats(request):
+    """Total vendors, sum to_pay, sum to_receive for owner's restaurants."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'total': 0, 'total_to_pay': '0', 'total_to_receive': '0'})
+    qs = Vendor.objects.filter(restaurant_id__in=owner_ids)
+    total = qs.count()
+    agg = qs.aggregate(to_pay=Sum('to_pay'), to_receive=Sum('to_receive'))
+    return Response({
+        'total': total,
+        'total_to_pay': str(agg['to_pay'] or 0),
+        'total_to_receive': str(agg['to_receive'] or 0),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_payroll_list(request):
+    """Payroll list for owner's staff: staff, restaurant, period, days, per_day, total salary, paid/due, status."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    start_dt, end_dt = _parse_date_range(request)
+    if start_dt is None or end_dt is None:
+        from datetime import datetime
+        today = timezone.now().date()
+        start_dt = timezone.make_aware(datetime(today.year, today.month, 1))
+        end_dt = timezone.now()
+    staff_qs = Staff.objects.filter(restaurant_id__in=owner_ids).select_related('user', 'restaurant').order_by('restaurant__name', 'user__name')
+    results = []
+    for s in staff_qs:
+        days = Attendance.objects.filter(
+            staff=s, date__gte=start_dt.date(), date__lte=end_dt.date(),
+            status=AttendanceStatus.PRESENT,
+        ).count()
+        per_day = s.per_day_salary or Decimal('0')
+        total_salary = per_day * days
+        paid_in_period = PaidRecord.objects.filter(staff=s, created_at__gte=start_dt, created_at__lte=end_dt).aggregate(s=Sum('amount'))['s'] or Decimal('0')
+        due = max(Decimal('0'), total_salary - paid_in_period)
+        role = 'manager' if s.is_manager else ('waiter' if s.is_waiter else ('kitchen' if s.is_kitchen else 'staff'))
+        results.append({
+            'id': s.id,
+            'staff_name': s.user.name if s.user_id else '',
+            'restaurant_id': s.restaurant_id,
+            'restaurant_name': s.restaurant.name if s.restaurant_id else '',
+            'period_start': start_dt.date().isoformat(),
+            'period_end': end_dt.date().isoformat(),
+            'days': days,
+            'per_day_salary': str(per_day),
+            'total_salary': str(total_salary),
+            'paid': str(paid_in_period),
+            'due': str(due),
+            'status': 'paid' if due == 0 else 'pending',
+        })
+    return Response({'count': len(results), 'next': None, 'previous': None, 'results': results})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_report_staff(request):
+    """Staff report: filters restaurant, date range, role; table Staff, Restaurant, Role, Attendance days, Salary, Paid, Due, Status."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'results': []})
+    start_dt, end_dt = _parse_date_range(request)
+    restaurant_id = request.query_params.get('restaurant_id')
+    if restaurant_id:
+        try:
+            rid = int(restaurant_id)
+            if rid not in owner_ids:
+                rid = None
+        except ValueError:
+            rid = None
+    else:
+        rid = None
+    qs = Staff.objects.filter(restaurant_id__in=owner_ids)
+    if rid is not None:
+        qs = qs.filter(restaurant_id=rid)
+    role_filter = request.query_params.get('role', '').strip().lower()
+    if role_filter == 'manager':
+        qs = qs.filter(is_manager=True)
+    elif role_filter == 'waiter':
+        qs = qs.filter(is_waiter=True)
+    elif role_filter == 'kitchen':
+        qs = qs.filter(is_kitchen=True)
+    qs = qs.select_related('user', 'restaurant').order_by('restaurant__name', 'user__name')
+    results = []
+    for s in qs:
+        if start_dt and end_dt:
+            days = Attendance.objects.filter(staff=s, date__gte=start_dt.date(), date__lte=end_dt.date(), status=AttendanceStatus.PRESENT).count()
+        else:
+            days = Attendance.objects.filter(staff=s, status=AttendanceStatus.PRESENT).count()
+        role = 'manager' if s.is_manager else ('waiter' if s.is_waiter else ('kitchen' if s.is_kitchen else 'staff'))
+        results.append({
+            'staff_name': s.user.name if s.user_id else '',
+            'restaurant_name': s.restaurant.name if s.restaurant_id else '',
+            'role': role,
+            'attendance_days': days,
+            'per_day_salary': str(s.per_day_salary or 0),
+            'to_pay': str(s.to_pay),
+            'status': 'active' if not s.is_suspend else 'inactive',
+        })
+    return Response({'results': results})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_report_finance(request):
+    """Finance report: revenue, expenses, dues, transactions summary; date range; owner scope."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'total_revenue': '0', 'total_due': '0', 'transaction_summary': {}, 'results': []})
+    start_dt, end_dt = _parse_date_range(request)
+    txn_qs = Transaction.objects.filter(restaurant_id__in=owner_ids)
+    if start_dt and end_dt:
+        txn_qs = txn_qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
+    total_revenue = txn_qs.filter(transaction_type=TransactionType.IN).aggregate(s=Sum('amount'))['s'] or Decimal('0')
+    total_due = Restaurant.objects.filter(id__in=owner_ids).aggregate(s=Sum('due_balance'))['s'] or Decimal('0')
+    summary = {
+        'total_transactions': txn_qs.count(),
+        'total_revenue': str(total_revenue),
+        'total_due': str(total_due),
+    }
+    return Response({**summary, 'results': []})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_report_credits(request):
+    """Credits report: customer credits and restaurant due; owner scope."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'customer_credit_due': '0', 'restaurant_due': '0', 'results': []})
+    customer_credit = CustomerRestaurant.objects.filter(restaurant_id__in=owner_ids).aggregate(s=Sum('to_pay'))['s'] or Decimal('0')
+    restaurant_due = Restaurant.objects.filter(id__in=owner_ids).aggregate(s=Sum('due_balance'))['s'] or Decimal('0')
+    return Response({
+        'customer_credit_due': str(customer_credit),
+        'restaurant_due': str(restaurant_due),
+        'results': [],
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_report_customers(request):
+    """Customer report: Customer, Orders, Spent, Credit, Tier; filters restaurant, date."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'results': []})
+    start_dt, end_dt = _parse_date_range(request)
+    restaurant_id = request.query_params.get('restaurant_id')
+    if restaurant_id:
+        try:
+            rid = int(restaurant_id)
+            if rid not in owner_ids:
+                rid = None
+        except ValueError:
+            rid = None
+    else:
+        rid = None
+    order_filter = Order.objects.filter(restaurant_id__in=owner_ids)
+    if rid is not None:
+        order_filter = order_filter.filter(restaurant_id=rid)
+    if start_dt and end_dt:
+        order_filter = order_filter.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
+    customer_ids = order_filter.values_list('customer_id', flat=True).distinct()
+    customer_ids = [x for x in customer_ids if x is not None]
+    if not customer_ids:
+        return Response({'results': []})
+    qs = Customer.objects.filter(id__in=customer_ids)
+    results = []
+    for c in qs:
+        oq = Order.objects.filter(customer=c, restaurant_id__in=owner_ids)
+        if rid is not None:
+            oq = oq.filter(restaurant_id=rid)
+        if start_dt and end_dt:
+            oq = oq.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
+        agg = oq.aggregate(orders=Count('id'), spent=Coalesce(Sum('total'), Value(Decimal('0'))))
+        orders = agg['orders'] or 0
+        spent = agg['spent'] or Decimal('0')
+        credit = CustomerRestaurant.objects.filter(customer=c, restaurant_id__in=owner_ids).aggregate(s=Sum('to_pay'))['s'] or Decimal('0')
+        tier = 'VIP' if orders >= 50 else ('Regular' if orders >= 20 else 'New')
+        results.append({
+            'customer_name': c.name,
+            'customer_id': c.id,
+            'orders': orders,
+            'spent': str(spent),
+            'credit': str(credit),
+            'tier': tier,
+        })
+    return Response({'results': results})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_report_products(request):
+    """Product report: product-wise sales quantity, revenue; filters restaurant, category, date."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'results': []})
+    from .models import OrderItem, Product
+    start_dt, end_dt = _parse_date_range(request)
+    order_qs = Order.objects.filter(restaurant_id__in=owner_ids, payment_status__in=['paid', 'success'])
+    if start_dt and end_dt:
+        order_qs = order_qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
+    order_ids = list(order_qs.values_list('id', flat=True))
+    if not order_ids:
+        return Response({'results': []})
+    items = OrderItem.objects.filter(order_id__in=order_ids).values('product_id', 'product__name').annotate(
+        quantity=Count('id'),
+        revenue=Sum('total'),
+    )
+    results = [{'product_id': r['product_id'], 'product_name': r['product__name'] or '', 'quantity': r['quantity'], 'revenue': str(r['revenue'] or 0)} for r in items]
+    return Response({'results': results})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_report_inventory(request):
+    """Inventory report: stock levels, low-stock; by restaurant, raw material; owner scope."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'results': []})
+    try:
+        from .models import RawMaterial
+        qs = RawMaterial.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant').order_by('name')
+        results = [{'id': r.id, 'name': r.name, 'restaurant_name': r.restaurant.name if r.restaurant_id else '', 'stock': str(getattr(r, 'stock', 0)), 'min_stock': str(getattr(r, 'min_stock', 0))} for r in qs]
+    except Exception:
+        results = []
+    return Response({'results': results})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_report_pl(request):
+    """P&L report: revenue, expenses breakdown, gross profit, net profit; monthly series; owner scope."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'revenue': '0', 'expenses': '0', 'net_profit': '0', 'breakdown': [], 'monthly': []})
+    start_dt, end_dt = _parse_date_range(request)
+    if not start_dt or not end_dt:
+        from datetime import datetime
+        now = timezone.now()
+        start_dt = now - timedelta(days=365)
+        end_dt = now
+    txn_in = Transaction.objects.filter(restaurant_id__in=owner_ids, transaction_type=TransactionType.IN, created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
+    revenue = txn_in.aggregate(s=Sum('amount'))['s'] or Decimal('0')
+    order_revenue = Order.objects.filter(restaurant_id__in=owner_ids, payment_status__in=['paid', 'success'], created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date()).aggregate(s=Sum('total'))['s'] or Decimal('0')
+    total_revenue = revenue + order_revenue
+    staff_salaries = PaidRecord.objects.filter(restaurant_id__in=owner_ids, staff__isnull=False, created_at__gte=start_dt, created_at__lte=end_dt).aggregate(s=Sum('amount'))['s'] or Decimal('0')
+    vendor_pay = PaidRecord.objects.filter(restaurant_id__in=owner_ids, vendor__isnull=False, created_at__gte=start_dt, created_at__lte=end_dt).aggregate(s=Sum('amount'))['s'] or Decimal('0')
+    try:
+        from .models import Expenses
+        other_expenses = Expenses.objects.filter(restaurant_id__in=owner_ids, created_at__gte=start_dt, created_at__lte=end_dt).aggregate(s=Sum('amount'))['s'] or Decimal('0')
+    except Exception:
+        other_expenses = Decimal('0')
+    expenses = staff_salaries + vendor_pay + other_expenses
+    net_profit = total_revenue - expenses
+    breakdown = [
+        {'label': 'Raw Material / Vendors', 'amount': str(vendor_pay)},
+        {'label': 'Staff Salaries', 'amount': str(staff_salaries)},
+        {'label': 'Operating Expenses', 'amount': str(other_expenses)},
+    ]
+    monthly = []
+    return Response({
+        'revenue': str(total_revenue),
+        'expenses': str(expenses),
+        'net_profit': str(net_profit),
+        'breakdown': breakdown,
+        'monthly': monthly,
     })
 
 
@@ -711,6 +1176,9 @@ def shareholder_withdrawal_detail(request, pk):
 
 def _transaction_queryset(request):
     qs = Transaction.objects.select_related('restaurant', 'restaurant__user').order_by('-created_at')
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None:
+        qs = qs.filter(restaurant_id__in=owner_ids)
     txn_type = (request.query_params.get('transaction_type') or request.query_params.get('type') or '').strip().lower()
     if txn_type in ('in', 'out'):
         qs = qs.filter(transaction_type=txn_type)
@@ -730,9 +1198,12 @@ def _transaction_queryset(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def transaction_stats(request):
     qs = Transaction.objects.all()
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None:
+        qs = qs.filter(restaurant_id__in=owner_ids)
     total_transaction = qs.count()
     total_revenue = qs.filter(transaction_type=TransactionType.IN).aggregate(s=Sum('amount'))['s'] or 0
     pending = qs.filter(payment_status=PaymentStatus.PENDING).count()
@@ -763,7 +1234,7 @@ def transaction_stats(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def transaction_list(request):
     qs = _transaction_queryset(request)
     ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
@@ -777,11 +1248,14 @@ def transaction_list(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def transaction_detail(request, pk):
     try:
         txn = Transaction.objects.select_related('restaurant', 'restaurant__user').get(pk=pk)
     except Transaction.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None and (txn.restaurant_id is None or txn.restaurant_id not in owner_ids):
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     serializer = TransactionDetailSerializer(txn, context={'request': request})
     return Response(serializer.data)

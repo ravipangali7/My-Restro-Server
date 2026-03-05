@@ -11,6 +11,7 @@ from .models import (
     SuperSetting,
     BulkNotification,
     Customer,
+    Vendor,
 )
 
 
@@ -648,3 +649,44 @@ class CustomerListSerializer(serializers.ModelSerializer):
 
     def get_image_url(self, obj):
         return None
+
+
+# --- Owner-scoped list serializers ---
+
+class OwnerStaffListSerializer(serializers.ModelSerializer):
+    name = serializers.CharField(source='user.name', read_only=True)
+    phone = serializers.CharField(source='user.phone', read_only=True)
+    country_code = serializers.CharField(source='user.country_code', read_only=True)
+    restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
+    restaurant_id = serializers.IntegerField(source='restaurant.id', read_only=True)
+    role = serializers.SerializerMethodField()
+    is_active = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Staff
+        fields = [
+            'id', 'name', 'phone', 'country_code', 'restaurant_id', 'restaurant_name',
+            'role', 'per_day_salary', 'to_pay', 'to_receive', 'is_suspend',
+            'is_active', 'created_at',
+        ]
+
+    def get_role(self, obj):
+        if obj.is_manager:
+            return 'manager'
+        if obj.is_waiter:
+            return 'waiter'
+        if obj.is_kitchen:
+            return 'kitchen'
+        return obj.designation or 'staff'
+
+    def get_is_active(self, obj):
+        return not obj.is_suspend
+
+
+class OwnerVendorListSerializer(serializers.ModelSerializer):
+    restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
+    restaurant_id = serializers.IntegerField(source='restaurant.id', read_only=True)
+
+    class Meta:
+        model = Vendor
+        fields = ['id', 'name', 'phone', 'country_code', 'restaurant_id', 'restaurant_name', 'to_pay', 'to_receive', 'created_at']
