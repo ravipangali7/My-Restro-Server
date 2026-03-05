@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.conf import settings
+from django.utils.text import slugify
 from .models import (
     User,
     Staff,
@@ -171,7 +172,11 @@ class OwnerCreateUpdateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         password = validated_data.pop('password', None)
-        validated_data.setdefault('is_owner', True)
+        if self.context.get('for_shareholder'):
+            validated_data['is_shareholder'] = True
+            validated_data['is_owner'] = False
+        else:
+            validated_data.setdefault('is_owner', True)
         # AbstractUser requires unique username; use country_code+phone
         if 'username' not in validated_data:
             validated_data['username'] = (validated_data.get('country_code') or '') + (validated_data.get('phone') or '')
@@ -308,6 +313,15 @@ class RestaurantCreateUpdateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         validated_data.setdefault('is_open', False)
+        slug = (validated_data.get('slug') or '').strip()
+        if not slug and validated_data.get('name'):
+            base_slug = slugify(validated_data['name'])
+            slug = base_slug
+            idx = 1
+            while Restaurant.objects.filter(slug=slug).exists():
+                slug = f'{base_slug}-{idx}'
+                idx += 1
+            validated_data['slug'] = slug
         return super().create(validated_data)
 
 

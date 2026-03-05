@@ -454,12 +454,16 @@ def _shareholder_queryset(request):
 @permission_classes([IsAuthenticated, IsSuperuser])
 def shareholder_list(request):
     if request.method == 'POST':
-        serializer = OwnerCreateUpdateSerializer(data=request.data, context={'request': request})
+        serializer = OwnerCreateUpdateSerializer(
+            data=request.data,
+            context={'request': request, 'for_shareholder': True},
+        )
         if serializer.is_valid():
             serializer.save()
             user = serializer.instance
             user.is_shareholder = True
-            user.save(update_fields=['is_shareholder'])
+            user.is_owner = False
+            user.save(update_fields=['is_shareholder', 'is_owner'])
             return Response(OwnerSerializer(user, context={'request': request}).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     qs = _shareholder_queryset(request)
@@ -535,12 +539,25 @@ def shareholder_stats(request):
         system_balance = sys_setting.balance if sys_setting else 0
     except Exception:
         system_balance = 0
-    # Pie chart: share distribution (percentages per shareholder)
+    # Status counts for pie chart: Active / Inactive / Pending (mutually exclusive)
+    active_sh = shareholders.filter(is_active=True, kyc_status=KycStatus.APPROVED).count()
+    pending_sh = shareholders.filter(kyc_status=KycStatus.PENDING).count()
+    inactive_sh = total_sh - active_sh - pending_sh
+    status_distribution = [
+        {'name': 'Active', 'value': active_sh},
+        {'name': 'Inactive', 'value': inactive_sh},
+        {'name': 'Pending', 'value': pending_sh},
+    ]
+    # Pie chart: share distribution (percentages per shareholder) - kept for backward compatibility
     dist = []
     for u in shareholders:
         dist.append({'name': u.name or str(u.phone), 'value': float(u.share_percentage or 0)})
     return Response({
         'total_shareholders': total_sh,
+        'active_shareholders': active_sh,
+        'inactive_shareholders': inactive_sh,
+        'pending_shareholders': pending_sh,
+        'status_distribution': status_distribution,
         'system_balance': str(system_balance),
         'shareholder_balance': str(sh_balance),
         'pending_withdrawal_balance': str(pending_w),
