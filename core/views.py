@@ -3,7 +3,7 @@ from django.db.models.functions import Coalesce
 from django.db.models import Value
 from django.db.models.functions import TruncDate, TruncMonth
 from django.utils import timezone
-from datetime import timedelta
+from datetime import datetime, timedelta, time
 from decimal import Decimal
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -84,17 +84,27 @@ def _parse_date_range(request):
     """Return (start_dt, end_dt) from query params: range preset or start_date/end_date."""
     range_preset = (request.query_params.get('range') or '').strip().lower()
     now = timezone.now()
-    if range_preset == 'last_24h' or range_preset == 'last_24_hour':
+    if range_preset in ('last_24h', 'last_24_hour', 'today'):
         return now - timedelta(hours=24), now
+    if range_preset == 'yesterday':
+        yesterday_date = now.date() - timedelta(days=1)
+        start_dt = timezone.make_aware(datetime.combine(yesterday_date, time.min))
+        end_dt = timezone.make_aware(datetime.combine(yesterday_date, time.max))
+        return start_dt, end_dt
     if range_preset == 'week':
         return now - timedelta(days=7), now
     if range_preset == 'month':
         return now - timedelta(days=30), now
+    if range_preset == 'monthly':
+        start_dt = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return start_dt, now
+    if range_preset == 'yearly':
+        start_dt = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        return start_dt, now
     start_s = request.query_params.get('start_date')
     end_s = request.query_params.get('end_date')
     if start_s and end_s:
         try:
-            from datetime import datetime
             start_dt = timezone.make_aware(datetime.strptime(start_s[:10], '%Y-%m-%d'))
             end_dt = timezone.make_aware(datetime.strptime(end_s[:10], '%Y-%m-%d'))
             if end_dt < start_dt:
@@ -412,7 +422,7 @@ def due_stats(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_dashboard_stats(request):
-    """Owner-scoped dashboard: restaurants count, staff count, revenue, due, recent activity."""
+    """Owner-scoped dashboard: restaurants count, staff count, revenue, due, recent activity. Optional range/start_date/end_date for period stats."""
     owner_ids = _owner_restaurant_ids(request)
     if owner_ids is None:
         return Response({'detail': 'Not available for superuser. Use dashboard-stats.'}, status=status.HTTP_403_FORBIDDEN)
@@ -425,13 +435,43 @@ def owner_dashboard_stats(request):
             'active_restaurants': 0,
             'recent_transactions': [],
         })
+    start_dt, end_dt = _parse_date_range(request)
     qs_rest = Restaurant.objects.filter(id__in=owner_ids)
     restaurants_count = qs_rest.count()
     active_restaurants = qs_rest.filter(is_open=True).count()
     total_due = qs_rest.aggregate(s=Sum('due_balance'))['s'] or Decimal('0')
-    total_revenue = qs_rest.aggregate(s=Sum('balance'))['s'] or Decimal('0')
     staff_count = Staff.objects.filter(restaurant_id__in=owner_ids).count()
-    recent = Transaction.objects.filter(restaurant_id__in=owner_ids).order_by('-created_at')[:10]
+
+    if start_dt is not None and end_dt is not None:
+        txn_revenue = Transaction.objects.filter(
+            restaurant_id__in=owner_ids,
+            transaction_type=TransactionType.IN,
+            created_at__gte=start_dt,
+            created_at__lte=end_dt,
+        ).aggregate(s=Sum('amount'))['s'] or Decimal('0')
+        order_revenue = Order.objects.filter(
+            restaurant_id__in=owner_ids,
+            payment_status__in=['paid', 'success'],
+            created_at__gte=start_dt,
+            created_at__lte=end_dt,
+        ).aggregate(s=Sum('total'))['s'] or Decimal('0')
+        total_revenue = txn_revenue + order_revenue
+        order_count = Order.objects.filter(
+            restaurant_id__in=owner_ids,
+            payment_status__in=['paid', 'success'],
+            created_at__gte=start_dt,
+            created_at__lte=end_dt,
+        ).count()
+        recent = Transaction.objects.filter(
+            restaurant_id__in=owner_ids,
+            created_at__gte=start_dt,
+            created_at__lte=end_dt,
+        ).order_by('-created_at')[:10]
+    else:
+        total_revenue = qs_rest.aggregate(s=Sum('balance'))['s'] or Decimal('0')
+        order_count = None
+        recent = Transaction.objects.filter(restaurant_id__in=owner_ids).order_by('-created_at')[:10]
+
     recent_data = [
         {
             'id': t.id,
@@ -444,14 +484,17 @@ def owner_dashboard_stats(request):
         }
         for t in recent
     ]
-    return Response({
+    payload = {
         'restaurants_count': restaurants_count,
         'staff_count': staff_count,
         'total_revenue': str(total_revenue),
         'total_due': str(total_due),
         'active_restaurants': active_restaurants,
         'recent_transactions': recent_data,
-    })
+    }
+    if order_count is not None:
+        payload['order_count'] = order_count
+    return Response(payload)
 
 
 @api_view(['GET'])
@@ -911,7 +954,6 @@ def owner_report_pl(request):
         return Response({'revenue': '0', 'expenses': '0', 'net_profit': '0', 'breakdown': [], 'monthly': []})
     start_dt, end_dt = _parse_date_range(request)
     if not start_dt or not end_dt:
-        from datetime import datetime
         now = timezone.now()
         start_dt = now - timedelta(days=365)
         end_dt = now
@@ -933,7 +975,76 @@ def owner_report_pl(request):
         {'label': 'Staff Salaries', 'amount': str(staff_salaries)},
         {'label': 'Operating Expenses', 'amount': str(other_expenses)},
     ]
+    # Build monthly time series for charts
+    txn_by_month = Transaction.objects.filter(
+        restaurant_id__in=owner_ids,
+        transaction_type=TransactionType.IN,
+        created_at__gte=start_dt,
+        created_at__lte=end_dt,
+    ).annotate(month_key=TruncMonth('created_at')).values('month_key').annotate(amount=Sum('amount')).order_by('month_key')
+    order_by_month = Order.objects.filter(
+        restaurant_id__in=owner_ids,
+        payment_status__in=['paid', 'success'],
+        created_at__gte=start_dt,
+        created_at__lte=end_dt,
+    ).annotate(month_key=TruncMonth('created_at')).values('month_key').annotate(amount=Sum('total')).order_by('month_key')
+    staff_by_month = PaidRecord.objects.filter(
+        restaurant_id__in=owner_ids,
+        staff__isnull=False,
+        created_at__gte=start_dt,
+        created_at__lte=end_dt,
+    ).annotate(month_key=TruncMonth('created_at')).values('month_key').annotate(amount=Sum('amount')).order_by('month_key')
+    vendor_by_month = PaidRecord.objects.filter(
+        restaurant_id__in=owner_ids,
+        vendor__isnull=False,
+        created_at__gte=start_dt,
+        created_at__lte=end_dt,
+    ).annotate(month_key=TruncMonth('created_at')).values('month_key').annotate(amount=Sum('amount')).order_by('month_key')
+    try:
+        from .models import Expenses as ExpensesModel
+        other_by_month = ExpensesModel.objects.filter(
+            restaurant_id__in=owner_ids,
+            created_at__gte=start_dt,
+            created_at__lte=end_dt,
+        ).annotate(month_key=TruncMonth('created_at')).values('month_key').annotate(amount=Sum('amount')).order_by('month_key')
+    except Exception:
+        other_by_month = []
+    by_month = {}
+    for r in txn_by_month:
+        key = r['month_key']
+        if key not in by_month:
+            by_month[key] = {'revenue': Decimal('0'), 'expenses': Decimal('0')}
+        by_month[key]['revenue'] += r['amount'] or Decimal('0')
+    for r in order_by_month:
+        key = r['month_key']
+        if key not in by_month:
+            by_month[key] = {'revenue': Decimal('0'), 'expenses': Decimal('0')}
+        by_month[key]['revenue'] += r['amount'] or Decimal('0')
+    for r in staff_by_month:
+        key = r['month_key']
+        if key not in by_month:
+            by_month[key] = {'revenue': Decimal('0'), 'expenses': Decimal('0')}
+        by_month[key]['expenses'] += r['amount'] or Decimal('0')
+    for r in vendor_by_month:
+        key = r['month_key']
+        if key not in by_month:
+            by_month[key] = {'revenue': Decimal('0'), 'expenses': Decimal('0')}
+        by_month[key]['expenses'] += r['amount'] or Decimal('0')
+    for r in other_by_month:
+        key = r['month_key']
+        if key not in by_month:
+            by_month[key] = {'revenue': Decimal('0'), 'expenses': Decimal('0')}
+        by_month[key]['expenses'] += r['amount'] or Decimal('0')
     monthly = []
+    for month_key in sorted(by_month.keys()):
+        rev = by_month[month_key]['revenue']
+        exp = by_month[month_key]['expenses']
+        monthly.append({
+            'month': month_key.strftime('%Y-%m') if hasattr(month_key, 'strftime') else str(month_key)[:7],
+            'revenue': str(rev),
+            'expenses': str(exp),
+            'net_profit': str(rev - exp),
+        })
     return Response({
         'revenue': str(total_revenue),
         'expenses': str(expenses),
