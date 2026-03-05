@@ -61,7 +61,9 @@ from .serializers import (
     BulkNotificationCreateUpdateSerializer,
     CustomerListSerializer,
     OwnerStaffListSerializer,
+    OwnerStaffCreateUpdateSerializer,
     OwnerVendorListSerializer,
+    OwnerVendorCreateUpdateSerializer,
 )
 
 
@@ -290,12 +292,15 @@ def restaurant_list(request):
 
 
 @api_view(['GET', 'PATCH', 'PUT', 'DELETE'])
-@permission_classes([IsAuthenticated, IsSuperuser])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def restaurant_detail(request, pk):
     try:
         rest = Restaurant.objects.select_related('user').get(pk=pk)
     except Restaurant.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    # Owner can only access their own restaurant
+    if not request.user.is_superuser and rest.user_id != request.user.id:
+        return Response({'detail': 'You do not have permission to access this restaurant.'}, status=status.HTTP_403_FORBIDDEN)
     if request.method == 'GET':
         serializer = RestaurantDetailSerializer(rest, context={'request': request})
         return Response(serializer.data)
@@ -305,6 +310,9 @@ def restaurant_detail(request, pk):
             serializer.save()
             return Response(RestaurantDetailSerializer(serializer.instance, context={'request': request}).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    if request.method == 'DELETE':
+        if not request.user.is_superuser:
+            return Response({'detail': 'Only superuser can delete restaurants.'}, status=status.HTTP_403_FORBIDDEN)
     rest.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -448,11 +456,49 @@ def owner_dashboard_stats(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
-def owner_staff_list(request):
-    """List staff for owner's restaurants; search, pagination, filter active/inactive."""
+def owner_staff_available_users(request):
+    """List users that can be assigned as staff (is_restaurant_staff). Optional search and restaurant_id to exclude already-assigned."""
     owner_ids = _owner_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
+        return Response({'results': []})
+    search = (request.query_params.get('search') or '').strip()
+    restaurant_id = request.query_params.get('restaurant_id')
+    try:
+        rid = int(restaurant_id) if restaurant_id else None
+    except ValueError:
+        rid = None
+    if rid is not None and rid not in owner_ids:
+        rid = None
+    qs = User.objects.filter(is_restaurant_staff=True).exclude(is_superuser=True).order_by('name', 'phone')
+    if search:
+        qs = qs.filter(Q(name__icontains=search) | Q(phone__icontains=search))
+    if rid is not None:
+        already_staff_ids = list(Staff.objects.filter(restaurant_id=rid).values_list('user_id', flat=True))
+        if already_staff_ids:
+            qs = qs.exclude(id__in=already_staff_ids)
+    qs = qs[:100]
+    results = [{'id': u.id, 'name': u.name or '', 'phone': u.phone or ''} for u in qs]
+    return Response({'results': results})
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_staff_list(request):
+    """List staff for owner's restaurants; search, pagination, filter active/inactive. POST to create."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        if request.method == 'POST':
+            return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
         return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    if request.method == 'POST':
+        serializer = OwnerStaffCreateUpdateSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                OwnerStaffListSerializer(serializer.instance, context={'request': request}).data,
+                status=status.HTTP_201_CREATED,
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     qs = Staff.objects.filter(restaurant_id__in=owner_ids).select_related('user', 'restaurant').order_by('restaurant__name', 'user__name')
     search = (request.query_params.get('search') or '').strip()
     if search:
@@ -488,6 +534,31 @@ def owner_staff_stats(request):
         'inactive': inactive,
         'total_due': str(total_due),
     })
+
+
+@api_view(['GET', 'PATCH', 'PUT'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_staff_detail(request, pk):
+    """Get or update a single staff; owner can only access staff of their restaurants."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        staff = Staff.objects.select_related('user', 'restaurant').get(pk=pk)
+    except Staff.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if staff.restaurant_id not in owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'GET':
+        serializer = OwnerStaffListSerializer(staff, context={'request': request})
+        return Response(serializer.data)
+    if request.method in ('PATCH', 'PUT'):
+        serializer = OwnerStaffCreateUpdateSerializer(staff, data=request.data, partial=True, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response(OwnerStaffListSerializer(serializer.instance, context={'request': request}).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
 
 @api_view(['GET'])
@@ -544,13 +615,24 @@ def owner_customers_stats(request):
     })
 
 
-@api_view(['GET'])
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_vendors_list(request):
-    """List vendors for owner's restaurants; search, pagination."""
+    """List vendors for owner's restaurants; search, pagination. POST to create."""
     owner_ids = _owner_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
+        if request.method == 'POST':
+            return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
         return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    if request.method == 'POST':
+        serializer = OwnerVendorCreateUpdateSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                OwnerVendorListSerializer(serializer.instance, context={'request': request}).data,
+                status=status.HTTP_201_CREATED,
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     qs = Vendor.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant').order_by('name')
     search = (request.query_params.get('search') or '').strip()
     if search:
@@ -559,6 +641,31 @@ def owner_vendors_list(request):
     page = paginator.paginate_queryset(qs, request)
     serializer = OwnerVendorListSerializer(page, many=True, context={'request': request})
     return paginator.get_paginated_response(serializer.data)
+
+
+@api_view(['GET', 'PATCH', 'PUT'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_vendor_detail(request, pk):
+    """Get or update a single vendor; owner can only access vendors of their restaurants."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        vendor = Vendor.objects.select_related('restaurant').get(pk=pk)
+    except Vendor.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if vendor.restaurant_id not in owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'GET':
+        serializer = OwnerVendorListSerializer(vendor, context={'request': request})
+        return Response(serializer.data)
+    if request.method in ('PATCH', 'PUT'):
+        serializer = OwnerVendorCreateUpdateSerializer(vendor, data=request.data, partial=True, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response(OwnerVendorListSerializer(serializer.instance, context={'request': request}).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
 
 @api_view(['GET'])

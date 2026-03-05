@@ -313,6 +313,9 @@ class RestaurantCreateUpdateSerializer(serializers.ModelSerializer):
         ]
 
     def create(self, validated_data):
+        request = self.context.get('request')
+        if request and getattr(request.user, 'is_owner', False) and not request.user.is_superuser:
+            validated_data['user'] = request.user
         validated_data.setdefault('is_open', False)
         slug = (validated_data.get('slug') or '').strip()
         if not slug and validated_data.get('name'):
@@ -683,10 +686,80 @@ class OwnerStaffListSerializer(serializers.ModelSerializer):
         return not obj.is_suspend
 
 
+class OwnerStaffCreateUpdateSerializer(serializers.ModelSerializer):
+    role = serializers.ChoiceField(choices=['manager', 'waiter', 'kitchen'], write_only=True, required=False)
+    monthly_salary = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True, min_value=0)
+
+    class Meta:
+        model = Staff
+        fields = ['restaurant', 'user', 'role', 'designation', 'monthly_salary', 'per_day_salary']
+
+    def validate_restaurant(self, value):
+        request = self.context.get('request')
+        if not request:
+            return value
+        owner_ids = list(Restaurant.objects.filter(user=request.user).values_list('id', flat=True))
+        if not request.user.is_superuser and value.id not in owner_ids:
+            raise serializers.ValidationError('You can only add staff to your own restaurants.')
+        return value
+
+    def validate(self, attrs):
+        from decimal import Decimal
+        monthly = attrs.pop('monthly_salary', None)
+        per_day = attrs.get('per_day_salary')
+        if monthly is not None and monthly != '':
+            attrs['per_day_salary'] = (Decimal(str(monthly)) / 30).quantize(Decimal('0.01'))
+            attrs['salary'] = Decimal(str(monthly))
+            attrs['salary_type'] = 'monthly'
+        elif per_day is not None and per_day != '':
+            attrs['salary'] = Decimal('0')
+            attrs['salary_type'] = 'per_day'
+        elif not self.partial:
+            attrs.setdefault('per_day_salary', Decimal('0'))
+            attrs.setdefault('salary_type', 'per_day')
+            attrs.setdefault('salary', Decimal('0'))
+        role = attrs.pop('role', None)
+        if role:
+            attrs['is_manager'] = role == 'manager'
+            attrs['is_waiter'] = role == 'waiter'
+            attrs['is_kitchen'] = role == 'kitchen'
+            if not attrs.get('designation'):
+                attrs['designation'] = role
+        return attrs
+
+    def create(self, validated_data):
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        return super().update(instance, validated_data)
+
+
 class OwnerVendorListSerializer(serializers.ModelSerializer):
     restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
     restaurant_id = serializers.IntegerField(source='restaurant.id', read_only=True)
+    image_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Vendor
-        fields = ['id', 'name', 'phone', 'country_code', 'restaurant_id', 'restaurant_name', 'to_pay', 'to_receive', 'created_at']
+        fields = ['id', 'name', 'phone', 'country_code', 'restaurant_id', 'restaurant_name', 'image_url', 'to_pay', 'to_receive', 'created_at']
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+
+
+class OwnerVendorCreateUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Vendor
+        fields = ['name', 'phone', 'country_code', 'restaurant', 'image']
+
+    def validate_restaurant(self, value):
+        request = self.context.get('request')
+        if not request:
+            return value
+        owner_ids = list(Restaurant.objects.filter(user=request.user).values_list('id', flat=True))
+        if not request.user.is_superuser and value.id not in owner_ids:
+            raise serializers.ValidationError('You can only add vendors to your own restaurants.')
+        return value
