@@ -8,10 +8,14 @@ class IsSuperuser(permissions.BasePermission):
 
 
 class IsSuperuserOrOwner(permissions.BasePermission):
-    """Superuser or owner can access (owner gets scoped data)."""
+    """Superuser, owner, or restaurant staff (e.g. manager) can access; views scope by _owner_or_manager_restaurant_ids."""
     def has_permission(self, request, view):
         return (
             request.user
             and request.user.is_authenticated
-            and (request.user.is_superuser or getattr(request.user, 'is_owner', False))
+            and (
+                request.user.is_superuser
+                or getattr(request.user, 'is_owner', False)
+                or getattr(request.user, 'is_restaurant_staff', False)
+            )
         )

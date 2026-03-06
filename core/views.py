@@ -31,6 +31,7 @@ from .models import (
     CustomerRestaurant,
     Attendance,
     PaidRecord,
+    ReceivedRecord,
     AttendanceStatus,
 )
 from .models import PaymentStatus
@@ -747,6 +748,141 @@ def owner_vendors_stats(request):
         'total': total,
         'total_to_pay': str(agg['to_pay'] or 0),
         'total_to_receive': str(agg['to_receive'] or 0),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_paid_records_list(request):
+    """List paid records for owner/manager restaurants; search, date range, pagination."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    qs = PaidRecord.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant').order_by('-created_at')
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(name__icontains=search))
+    date_from = request.query_params.get('date_from') or request.query_params.get('start_date')
+    date_to = request.query_params.get('date_to') or request.query_params.get('end_date')
+    if date_from:
+        try:
+            qs = qs.filter(created_at__date__gte=date_from[:10])
+        except (TypeError, ValueError):
+            pass
+    if date_to:
+        try:
+            qs = qs.filter(created_at__date__lte=date_to[:10])
+        except (TypeError, ValueError):
+            pass
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    results = [
+        {
+            'id': r.id,
+            'name': r.name,
+            'amount': str(r.amount),
+            'payment_method': r.payment_method or '',
+            'remarks': r.remarks or '',
+            'created_at': r.created_at.isoformat() if r.created_at else '',
+        }
+        for r in page
+    ]
+    return paginator.get_paginated_response(results)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_paid_records_stats(request):
+    """Total paid amount and count for owner/manager restaurants (optional date range)."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'total_amount': '0', 'count': 0})
+    qs = PaidRecord.objects.filter(restaurant_id__in=owner_ids)
+    date_from = request.query_params.get('date_from') or request.query_params.get('start_date')
+    date_to = request.query_params.get('date_to') or request.query_params.get('end_date')
+    if date_from:
+        try:
+            qs = qs.filter(created_at__date__gte=date_from[:10])
+        except (TypeError, ValueError):
+            pass
+    if date_to:
+        try:
+            qs = qs.filter(created_at__date__lte=date_to[:10])
+        except (TypeError, ValueError):
+            pass
+    agg = qs.aggregate(total=Sum('amount'), count=Count('id'))
+    return Response({
+        'total_amount': str(agg['total'] or 0),
+        'count': agg['count'] or 0,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_received_records_list(request):
+    """List received records for owner/manager restaurants; search, date range, pagination."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    qs = ReceivedRecord.objects.filter(restaurant_id__in=owner_ids).select_related(
+        'restaurant', 'customer', 'order'
+    ).order_by('-created_at')
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(name__icontains=search) | Q(remarks__icontains=search))
+    date_from = request.query_params.get('date_from') or request.query_params.get('start_date')
+    date_to = request.query_params.get('date_to') or request.query_params.get('end_date')
+    if date_from:
+        try:
+            qs = qs.filter(created_at__date__gte=date_from[:10])
+        except (TypeError, ValueError):
+            pass
+    if date_to:
+        try:
+            qs = qs.filter(created_at__date__lte=date_to[:10])
+        except (TypeError, ValueError):
+            pass
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    results = []
+    for r in page:
+        results.append({
+            'id': r.id,
+            'name': r.name,
+            'amount': str(r.amount),
+            'payment_method': r.payment_method or '',
+            'remarks': r.remarks or '',
+            'created_at': r.created_at.isoformat() if r.created_at else '',
+            'customer_name': r.customer.name if r.customer_id else None,
+            'order_id': r.order_id,
+        })
+    return paginator.get_paginated_response(results)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_received_records_stats(request):
+    """Total received amount and count for owner/manager restaurants (optional date range)."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'total_amount': '0', 'count': 0})
+    qs = ReceivedRecord.objects.filter(restaurant_id__in=owner_ids)
+    date_from = request.query_params.get('date_from') or request.query_params.get('start_date')
+    date_to = request.query_params.get('date_to') or request.query_params.get('end_date')
+    if date_from:
+        try:
+            qs = qs.filter(created_at__date__gte=date_from[:10])
+        except (TypeError, ValueError):
+            pass
+    if date_to:
+        try:
+            qs = qs.filter(created_at__date__lte=date_to[:10])
+        except (TypeError, ValueError):
+            pass
+    agg = qs.aggregate(total=Sum('amount'), count=Count('id'))
+    return Response({
+        'total_amount': str(agg['total'] or 0),
+        'count': agg['count'] or 0,
     })
 
 
