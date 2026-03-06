@@ -75,9 +75,28 @@ class StandardPagination(PageNumberPagination):
 
 def _owner_restaurant_ids(request):
     """Return list of restaurant IDs for request.user when owner; else None (no filter)."""
-    if not getattr(request.user, 'is_owner', False):
+    if getattr(request.user, 'is_owner', False):
+        return list(Restaurant.objects.filter(user=request.user).values_list('id', flat=True))
+    return None
+
+
+def _manager_restaurant_id(request):
+    """Return single restaurant_id when request.user is restaurant staff (e.g. manager); else None."""
+    if not getattr(request.user, 'is_restaurant_staff', False):
         return None
-    return list(Restaurant.objects.filter(user=request.user).values_list('id', flat=True))
+    staff = Staff.objects.filter(user=request.user).first()
+    return staff.restaurant_id if staff else None
+
+
+def _owner_or_manager_restaurant_ids(request):
+    """Return list of restaurant IDs for owner (all their restaurants) or manager (single restaurant); else None."""
+    owner_ids = _owner_restaurant_ids(request)
+    if owner_ids is not None:
+        return owner_ids
+    manager_rid = _manager_restaurant_id(request)
+    if manager_rid is not None:
+        return [manager_rid]
+    return None
 
 
 def _parse_date_range(request):
@@ -255,7 +274,7 @@ def owner_analytics(request):
 def _restaurant_queryset(request, restrict_to_owner=True):
     qs = Restaurant.objects.all().select_related('user').order_by('-created_at')
     if restrict_to_owner:
-        owner_ids = _owner_restaurant_ids(request)
+        owner_ids = _owner_or_manager_restaurant_ids(request)
         if owner_ids is not None:
             qs = qs.filter(id__in=owner_ids)
     if request.query_params.get('has_due') == 'true':
@@ -331,7 +350,7 @@ def restaurant_detail(request, pk):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def restaurant_stats(request):
     qs = Restaurant.objects.all()
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None:
         qs = qs.filter(id__in=owner_ids)
     total = qs.count()
@@ -394,7 +413,7 @@ def restaurant_analytics(request):
 def due_stats(request):
     """Stats for Due listing: total due count/amount, over threshold, outstanding."""
     qs_with_due = Restaurant.objects.filter(due_balance__gt=0)
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None:
         qs_with_due = qs_with_due.filter(id__in=owner_ids)
     total_due_count = qs_with_due.count()
@@ -423,7 +442,7 @@ def due_stats(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_dashboard_stats(request):
     """Owner-scoped dashboard: restaurants count, staff count, revenue, due, recent activity. Optional range/start_date/end_date for period stats."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None:
         return Response({'detail': 'Not available for superuser. Use dashboard-stats.'}, status=status.HTTP_403_FORBIDDEN)
     if not owner_ids:
@@ -501,7 +520,7 @@ def owner_dashboard_stats(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_staff_available_users(request):
     """List users that can be assigned as staff. Search by phone required. Excludes only users already staff at the given restaurant (or at any of owner's restaurants if no restaurant_id)."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'results': []})
     search = (request.query_params.get('search') or '').strip()
@@ -531,7 +550,7 @@ def owner_staff_available_users(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_staff_list(request):
     """List staff for owner's restaurants; search, pagination, filter active/inactive. POST to create."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         if request.method == 'POST':
             return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
@@ -566,7 +585,7 @@ def owner_staff_list(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_staff_stats(request):
     """Total, active, inactive staff and total due for owner's restaurants."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'total': 0, 'active': 0, 'inactive': 0, 'total_due': '0'})
     qs = Staff.objects.filter(restaurant_id__in=owner_ids)
@@ -586,7 +605,7 @@ def owner_staff_stats(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_staff_detail(request, pk):
     """Get or update a single staff; owner can only access staff of their restaurants."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     try:
@@ -611,7 +630,7 @@ def owner_staff_detail(request, pk):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_customers_list(request):
     """List customers with orders in owner's restaurants; total_orders, total_spent, credit_due."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
     qs = Customer.objects.filter(orders__restaurant_id__in=owner_ids).distinct().annotate(
@@ -643,7 +662,7 @@ def owner_customers_list(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_customers_stats(request):
     """Total customers, VIP count (e.g. 50+ orders), credit_due sum for owner scope."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'total': 0, 'vip_count': 0, 'credit_due': '0'})
     qs = Customer.objects.filter(orders__restaurant_id__in=owner_ids).distinct().annotate(
@@ -665,7 +684,7 @@ def owner_customers_stats(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_vendors_list(request):
     """List vendors for owner's restaurants; search, pagination. POST to create."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         if request.method == 'POST':
             return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
@@ -693,7 +712,7 @@ def owner_vendors_list(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_vendor_detail(request, pk):
     """Get or update a single vendor; owner can only access vendors of their restaurants."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     try:
@@ -718,7 +737,7 @@ def owner_vendor_detail(request, pk):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_vendors_stats(request):
     """Total vendors, sum to_pay, sum to_receive for owner's restaurants."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'total': 0, 'total_to_pay': '0', 'total_to_receive': '0'})
     qs = Vendor.objects.filter(restaurant_id__in=owner_ids)
@@ -735,7 +754,7 @@ def owner_vendors_stats(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_payroll_list(request):
     """Payroll list for owner's staff: staff, restaurant, period, days, per_day, total salary, paid/due, status."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
     start_dt, end_dt = _parse_date_range(request)
@@ -777,7 +796,7 @@ def owner_payroll_list(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_report_staff(request):
     """Staff report: filters restaurant, date range, role; table Staff, Restaurant, Role, Attendance days, Salary, Paid, Due, Status."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'results': []})
     start_dt, end_dt = _parse_date_range(request)
@@ -825,7 +844,7 @@ def owner_report_staff(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_report_finance(request):
     """Finance report: revenue, expenses, dues, transactions summary; date range; owner scope."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'total_revenue': '0', 'total_due': '0', 'transaction_summary': {}, 'results': []})
     start_dt, end_dt = _parse_date_range(request)
@@ -846,7 +865,7 @@ def owner_report_finance(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_report_credits(request):
     """Credits report: customer credits and restaurant due; owner scope."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'customer_credit_due': '0', 'restaurant_due': '0', 'results': []})
     customer_credit = CustomerRestaurant.objects.filter(restaurant_id__in=owner_ids).aggregate(s=Sum('to_pay'))['s'] or Decimal('0')
@@ -862,7 +881,7 @@ def owner_report_credits(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_report_customers(request):
     """Customer report: Customer, Orders, Spent, Credit, Tier; filters restaurant, date."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'results': []})
     start_dt, end_dt = _parse_date_range(request)
@@ -913,7 +932,7 @@ def owner_report_customers(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_report_products(request):
     """Product report: product-wise sales quantity, revenue; filters restaurant, category, date."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'results': []})
     from .models import OrderItem, Product
@@ -936,7 +955,7 @@ def owner_report_products(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_report_inventory(request):
     """Inventory report: stock levels, low-stock; by restaurant, raw material; owner scope."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'results': []})
     try:
@@ -952,7 +971,7 @@ def owner_report_inventory(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_report_pl(request):
     """P&L report: revenue, expenses breakdown, gross profit, net profit; monthly series; owner scope."""
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'revenue': '0', 'expenses': '0', 'net_profit': '0', 'breakdown': [], 'monthly': []})
     start_dt, end_dt = _parse_date_range(request)
@@ -1397,7 +1416,7 @@ def shareholder_withdrawal_detail(request, pk):
 
 def _transaction_queryset(request):
     qs = Transaction.objects.select_related('restaurant', 'restaurant__user').order_by('-created_at')
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None:
         qs = qs.filter(restaurant_id__in=owner_ids)
     txn_type = (request.query_params.get('transaction_type') or request.query_params.get('type') or '').strip().lower()
@@ -1422,7 +1441,7 @@ def _transaction_queryset(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def transaction_stats(request):
     qs = Transaction.objects.all()
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None:
         qs = qs.filter(restaurant_id__in=owner_ids)
     total_transaction = qs.count()
@@ -1475,7 +1494,7 @@ def transaction_detail(request, pk):
         txn = Transaction.objects.select_related('restaurant', 'restaurant__user').get(pk=pk)
     except Transaction.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None and (txn.restaurant_id is None or txn.restaurant_id not in owner_ids):
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     serializer = TransactionDetailSerializer(txn, context={'request': request})
@@ -1641,7 +1660,7 @@ def qr_stand_order_price(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def qr_stand_order_stats(request):
     qs = QrStandOrder.objects.all()
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None:
         qs = qs.filter(restaurant_id__in=owner_ids)
     total_orders = qs.count()
@@ -1671,7 +1690,7 @@ def qr_stand_order_list(request):
             return Response(out_serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     qs = QrStandOrder.objects.select_related('restaurant').order_by('-created_at')
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None:
         qs = qs.filter(restaurant_id__in=owner_ids)
     status_filter = request.query_params.get('status', '').strip().lower()
@@ -1693,7 +1712,7 @@ def qr_stand_order_detail(request, pk):
         order = QrStandOrder.objects.select_related('restaurant').get(pk=pk)
     except QrStandOrder.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None and order.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'GET':
@@ -1725,7 +1744,7 @@ def qr_stand_order_pay(request, pk):
         order = QrStandOrder.objects.select_related('restaurant').get(pk=pk)
     except QrStandOrder.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None and order.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     try:
@@ -1743,7 +1762,7 @@ def qr_stand_order_pay(request, pk):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def qr_stand_order_analytics(request):
     qs = QrStandOrder.objects.all().select_related('restaurant')
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None:
         qs = qs.filter(restaurant_id__in=owner_ids)
     start_dt, end_dt = _parse_date_range(request)
@@ -1825,7 +1844,7 @@ def notification_list(request):
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     qs = BulkNotification.objects.select_related('restaurant').order_by('-created_at')
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None:
         qs = qs.filter(restaurant_id__in=owner_ids)
     search = (request.query_params.get('search') or '').strip()
@@ -1847,7 +1866,7 @@ def notification_detail(request, pk):
         obj = BulkNotification.objects.select_related('restaurant').get(pk=pk)
     except BulkNotification.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None and obj.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'GET':
@@ -1873,7 +1892,7 @@ def notification_send(request, pk):
         obj = BulkNotification.objects.select_related('restaurant').get(pk=pk)
     except BulkNotification.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None and obj.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     total = len(obj.receivers or [])
@@ -1890,7 +1909,7 @@ def notification_send(request, pk):
 def notification_stats(request):
     """Return total, sms, whatsapp counts for BulkNotification."""
     qs = BulkNotification.objects.all()
-    owner_ids = _owner_restaurant_ids(request)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None:
         qs = qs.filter(restaurant_id__in=owner_ids)
     total = qs.count()

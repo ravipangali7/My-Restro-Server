@@ -25,9 +25,12 @@ def _build_media_url(request, path):
 
 
 class UserSerializer(serializers.ModelSerializer):
-    """Safe user fields for API responses; no password. Includes image_url and last_login for profile/me."""
+    """Safe user fields for API responses; no password. Includes image_url and last_login for profile/me.
+    For restaurant staff, includes restaurant_id and staff_id so manager/waiter/kitchen can scope API calls."""
     staff_role = serializers.SerializerMethodField()
     image_url = serializers.SerializerMethodField()
+    restaurant_id = serializers.SerializerMethodField()
+    staff_id = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -40,6 +43,8 @@ class UserSerializer(serializers.ModelSerializer):
             'is_owner',
             'is_restaurant_staff',
             'staff_role',
+            'restaurant_id',
+            'staff_id',
             'kyc_status',
             'is_shareholder',
             'share_percentage',
@@ -68,6 +73,14 @@ class UserSerializer(serializers.ModelSerializer):
         if staff.is_kitchen:
             return 'kitchen'
         return None
+
+    def get_restaurant_id(self, obj):
+        staff = obj.staff_profiles.first()
+        return staff.restaurant_id if staff else None
+
+    def get_staff_id(self, obj):
+        staff = obj.staff_profiles.first()
+        return staff.pk if staff else None
 
 
 # --- SuperSetting (super admin) ---
