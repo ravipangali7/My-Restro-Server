@@ -30,6 +30,22 @@ urlpatterns = [
     path('owner/reports/products/', views.owner_report_products),
     path('owner/reports/inventory/', views.owner_report_inventory),
     path('owner/reports/pl/', views.owner_report_pl),
+    # Units (owner/manager)
+    path('units/', views.units_list),
+    path('units/<int:pk>/', views.unit_detail),
+    # Categories (owner/manager)
+    path('categories/', views.categories_list),
+    path('categories/<int:pk>/', views.category_detail),
+    # Raw materials (owner/manager)
+    path('raw-materials/', views.raw_materials_list),
+    # Orders (owner/manager)
+    path('orders/', views.orders_list),
+    # Products (owner/manager)
+    path('products/', views.products_list),
+    path('products/<int:pk>/', views.product_detail),
+    # Combos (owner/manager)
+    path('combos/', views.combos_list),
+    path('combos/<int:pk>/', views.combo_detail),
     # Super admin: Owners
     path('owners/stats/', views.owner_stats),
     path('owners/analytics/', views.owner_analytics),

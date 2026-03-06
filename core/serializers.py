@@ -12,6 +12,13 @@ from .models import (
     BulkNotification,
     Customer,
     Vendor,
+    Unit,
+    Category,
+    Product,
+    ProductVariant,
+    ProductRawMaterial,
+    RawMaterial,
+    ComboSet,
 )
 
 
@@ -805,7 +812,307 @@ class OwnerVendorCreateUpdateSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if not request:
             return value
-        owner_ids = list(Restaurant.objects.filter(user=request.user).values_list('id', flat=True))
-        if not request.user.is_superuser and value.id not in owner_ids:
+        owner_ids = self.context.get('owner_ids')
+        if owner_ids is not None and value.id not in owner_ids:
             raise serializers.ValidationError('You can only add vendors to your own restaurants.')
+        if owner_ids is None and not request.user.is_superuser:
+            owner_ids = list(Restaurant.objects.filter(user=request.user).values_list('id', flat=True))
+            if value.id not in owner_ids:
+                raise serializers.ValidationError('You can only add vendors to your own restaurants.')
         return value
+
+
+# --- Units (owner/manager scoped) ---
+
+class UnitListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Unit
+        fields = ['id', 'name', 'symbol', 'restaurant', 'created_at', 'updated_at']
+
+
+class UnitCreateUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Unit
+        fields = ['name', 'symbol', 'restaurant']
+
+    def validate_restaurant(self, value):
+        owner_ids = self.context.get('owner_ids')
+        if owner_ids is not None and value.id not in owner_ids:
+            raise serializers.ValidationError('Restaurant not in your scope.')
+        return value
+
+
+# --- Categories (owner/manager scoped) ---
+
+class CategoryListSerializer(serializers.ModelSerializer):
+    item_count = serializers.IntegerField(read_only=True)
+    image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Category
+        fields = ['id', 'name', 'image', 'image_url', 'restaurant', 'item_count', 'created_at', 'updated_at']
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+
+
+class CategoryCreateUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Category
+        fields = ['name', 'image', 'restaurant']
+
+    def validate_restaurant(self, value):
+        owner_ids = self.context.get('owner_ids')
+        if owner_ids is not None and value.id not in owner_ids:
+            raise serializers.ValidationError('Restaurant not in your scope.')
+        return value
+
+
+# --- Products (owner/manager scoped, with variants and raw_material_links) ---
+
+class ProductVariantNestedSerializer(serializers.ModelSerializer):
+    unit_name = serializers.CharField(source='unit.name', read_only=True)
+    unit_symbol = serializers.CharField(source='unit.symbol', read_only=True)
+
+    class Meta:
+        model = ProductVariant
+        fields = ['id', 'unit', 'unit_name', 'unit_symbol', 'price', 'discount_type', 'discount', 'created_at', 'updated_at']
+
+
+class ProductRawMaterialNestedSerializer(serializers.ModelSerializer):
+    raw_material_name = serializers.CharField(source='raw_material.name', read_only=True)
+
+    class Meta:
+        model = ProductRawMaterial
+        fields = ['id', 'raw_material', 'raw_material_name', 'raw_material_quantity', 'product_variant', 'image', 'created_at', 'updated_at']
+
+
+class ProductListSerializer(serializers.ModelSerializer):
+    category_id = serializers.IntegerField(source='category_id', read_only=True)
+    category_name = serializers.CharField(source='category.name', read_only=True)
+    variants = ProductVariantNestedSerializer(many=True, read_only=True)
+    raw_material_links_count = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            'id', 'name', 'restaurant', 'category', 'category_id', 'category_name',
+            'image', 'image_url', 'is_active', 'dish_type',
+            'variants', 'raw_material_links_count',
+            'created_at', 'updated_at',
+        ]
+
+    def get_raw_material_links_count(self, obj):
+        return getattr(obj, 'raw_material_links_count', obj.raw_material_links.count())
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+
+
+class ProductDetailSerializer(serializers.ModelSerializer):
+    category_id = serializers.IntegerField(source='category_id', read_only=True)
+    category_name = serializers.CharField(source='category.name', read_only=True)
+    variants = ProductVariantNestedSerializer(many=True, read_only=True)
+    raw_material_links = ProductRawMaterialNestedSerializer(many=True, read_only=True)
+    image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            'id', 'name', 'restaurant', 'category', 'category_id', 'category_name',
+            'image', 'image_url', 'is_active', 'dish_type',
+            'variants', 'raw_material_links',
+            'created_at', 'updated_at',
+        ]
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+
+
+class ProductVariantWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductVariant
+        fields = ['id', 'unit', 'price', 'discount_type', 'discount']
+
+    def validate_unit(self, value):
+        owner_ids = self.context.get('owner_ids')
+        if owner_ids is not None and value.restaurant_id not in owner_ids:
+            raise serializers.ValidationError('Unit not in your scope.')
+        return value
+
+
+class ProductRawMaterialWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductRawMaterial
+        fields = ['id', 'raw_material', 'raw_material_quantity', 'product_variant', 'image']
+
+    def validate_raw_material(self, value):
+        owner_ids = self.context.get('owner_ids')
+        if owner_ids is not None and value.restaurant_id not in owner_ids:
+            raise serializers.ValidationError('Raw material not in your scope.')
+        return value
+
+    def validate_product_variant(self, value):
+        if value is None:
+            return value
+        product = self.context.get('product')
+        if product and value.product_id != product.id:
+            raise serializers.ValidationError('Variant must belong to this product.')
+        return value
+
+
+class ProductCreateUpdateSerializer(serializers.ModelSerializer):
+    variants = ProductVariantWriteSerializer(many=True, required=False)
+    raw_material_links = ProductRawMaterialWriteSerializer(many=True, required=False)
+
+    class Meta:
+        model = Product
+        fields = ['name', 'restaurant', 'category', 'image', 'is_active', 'dish_type', 'variants', 'raw_material_links']
+
+    def validate_category(self, value):
+        owner_ids = self.context.get('owner_ids')
+        if owner_ids is not None and value.restaurant_id not in owner_ids:
+            raise serializers.ValidationError('Category not in your scope.')
+        return value
+
+    def validate_restaurant(self, value):
+        owner_ids = self.context.get('owner_ids')
+        if owner_ids is not None and value.id not in owner_ids:
+            raise serializers.ValidationError('Restaurant not in your scope.')
+        return value
+
+    def create(self, validated_data):
+        variants_data = validated_data.pop('variants', [])
+        raw_material_links_data = validated_data.pop('raw_material_links', [])
+        product = Product.objects.create(**validated_data)
+        for v in variants_data:
+            ProductVariant.objects.create(product=product, **v)
+        for r in raw_material_links_data:
+            ProductRawMaterial.objects.create(
+                restaurant=product.restaurant,
+                product=product,
+                raw_material=r['raw_material'],
+                raw_material_quantity=r['raw_material_quantity'],
+                product_variant=r.get('product_variant'),
+                image=r.get('image'),
+            )
+        return product
+
+    def update(self, instance, validated_data):
+        variants_data = validated_data.pop('variants', None)
+        raw_material_links_data = validated_data.pop('raw_material_links', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if variants_data is not None:
+            ProductVariant.objects.filter(product=instance).delete()
+            for v in variants_data:
+                ProductVariant.objects.create(product=instance, **v)
+        if raw_material_links_data is not None:
+            ProductRawMaterial.objects.filter(product=instance).delete()
+            for r in raw_material_links_data:
+                ProductRawMaterial.objects.create(
+                    restaurant=instance.restaurant,
+                    product=instance,
+                    raw_material=r['raw_material'],
+                    raw_material_quantity=r['raw_material_quantity'],
+                    product_variant=r.get('product_variant'),
+                    image=r.get('image'),
+                )
+        return instance
+
+
+# --- Combos (owner/manager scoped) ---
+
+class ComboSetListSerializer(serializers.ModelSerializer):
+    products_count = serializers.SerializerMethodField()
+    product_names = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ComboSet
+        fields = ['id', 'name', 'description', 'image', 'image_url', 'restaurant', 'price', 'products_count', 'product_names', 'created_at', 'updated_at']
+
+    def get_products_count(self, obj):
+        return getattr(obj, 'products_count', obj.products.count())
+
+    def get_product_names(self, obj):
+        return list(obj.products.values_list('name', flat=True)[:10])
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+
+
+class ComboSetDetailSerializer(serializers.ModelSerializer):
+    product_ids = serializers.SerializerMethodField()
+    product_names = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ComboSet
+        fields = ['id', 'name', 'description', 'image', 'image_url', 'restaurant', 'price', 'product_ids', 'product_names', 'created_at', 'updated_at']
+
+    def get_product_ids(self, obj):
+        return list(obj.products.values_list('id', flat=True))
+
+    def get_product_names(self, obj):
+        return list(obj.products.values_list('name', flat=True))
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+
+
+class ComboSetCreateUpdateSerializer(serializers.ModelSerializer):
+    products = serializers.ListField(child=serializers.IntegerField(), write_only=True, required=False)
+
+    class Meta:
+        model = ComboSet
+        fields = ['name', 'description', 'image', 'restaurant', 'price', 'products']
+
+    def validate_restaurant(self, value):
+        owner_ids = self.context.get('owner_ids')
+        if owner_ids is not None and value.id not in owner_ids:
+            raise serializers.ValidationError('Restaurant not in your scope.')
+        return value
+
+    def validate_products(self, value):
+        owner_ids = self.context.get('owner_ids')
+        if not owner_ids:
+            return value
+        from .models import Product
+        valid = set(Product.objects.filter(id__in=value, restaurant_id__in=owner_ids).values_list('id', flat=True))
+        if len(value) != len([i for i in value if i in valid]):
+            raise serializers.ValidationError('Some product IDs are not in your scope.')
+        return value
+
+    def create(self, validated_data):
+        product_ids = validated_data.pop('products', [])
+        combo = ComboSet.objects.create(**validated_data)
+        if product_ids:
+            combo.products.set(product_ids)
+        return combo
+
+    def update(self, instance, validated_data):
+        product_ids = validated_data.pop('products', None)
+        for attr, val in validated_data.items():
+            setattr(instance, attr, val)
+        instance.save()
+        if product_ids is not None:
+            instance.products.set(product_ids)
+        return instance

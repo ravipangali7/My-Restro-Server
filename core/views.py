@@ -1,4 +1,4 @@
-from django.db.models import Q, Sum, Count
+from django.db.models import Q, Sum, Count, F
 from django.db.models.functions import Coalesce
 from django.db.models import Value
 from django.db.models.functions import TruncDate, TruncMonth
@@ -33,6 +33,12 @@ from .models import (
     PaidRecord,
     ReceivedRecord,
     AttendanceStatus,
+    Unit,
+    Category,
+    Table,
+    RawMaterial,
+    Product,
+    ComboSet,
 )
 from .models import PaymentStatus
 from .permissions import IsSuperuser, IsSuperuserOrOwner
@@ -65,6 +71,16 @@ from .serializers import (
     OwnerStaffCreateUpdateSerializer,
     OwnerVendorListSerializer,
     OwnerVendorCreateUpdateSerializer,
+    UnitListSerializer,
+    UnitCreateUpdateSerializer,
+    CategoryListSerializer,
+    CategoryCreateUpdateSerializer,
+    ProductListSerializer,
+    ProductDetailSerializer,
+    ProductCreateUpdateSerializer,
+    ComboSetListSerializer,
+    ComboSetDetailSerializer,
+    ComboSetCreateUpdateSerializer,
 )
 
 
@@ -514,6 +530,63 @@ def owner_dashboard_stats(request):
     }
     if order_count is not None:
         payload['order_count'] = order_count
+
+    # Manager dashboard extras when date range is provided
+    if start_dt is not None and end_dt is not None:
+        pending_orders_count = Order.objects.filter(
+            restaurant_id__in=owner_ids,
+        ).exclude(payment_status__in=['paid', 'success']).count()
+        payload['pending_orders_count'] = pending_orders_count
+
+        low_stock_qs = RawMaterial.objects.filter(
+            restaurant_id__in=owner_ids,
+            min_stock__isnull=False,
+        ).filter(stock__lt=F('min_stock'))
+        payload['low_stock_count'] = low_stock_qs.count()
+        payload['low_stock_items'] = [
+            {
+                'id': r.id,
+                'name': r.name,
+                'stock': str(r.stock),
+                'min_stock': str(r.min_stock),
+                'unit': r.unit.symbol or r.unit.name if r.unit_id else '',
+            }
+            for r in low_stock_qs.select_related('unit')[:20]
+        ]
+
+        payload['active_tables_count'] = Table.objects.filter(restaurant_id__in=owner_ids).count()
+
+        recent_orders_qs = Order.objects.filter(
+            restaurant_id__in=owner_ids,
+            created_at__gte=start_dt,
+            created_at__lte=end_dt,
+        ).annotate(items_count=Count('items')).select_related('table').order_by('-created_at')[:15]
+        payload['recent_orders'] = [
+            {
+                'id': o.id,
+                'table_number': o.table_number or (o.table.name if o.table_id else ''),
+                'total': str(o.total),
+                'status': o.status,
+                'payment_status': o.payment_status,
+                'items_count': getattr(o, 'items_count', 0),
+                'created_at': o.created_at.isoformat() if hasattr(o.created_at, 'isoformat') else str(o.created_at),
+            }
+            for o in recent_orders_qs
+        ]
+
+        today = timezone.now().date()
+        attendance_today_qs = Attendance.objects.filter(
+            restaurant_id__in=owner_ids,
+            date=today,
+        ).select_related('staff', 'staff__user').order_by('staff__user__name')
+        payload['attendance_today'] = [
+            {
+                'staff_name': a.staff.user.name if a.staff and a.staff.user_id else '',
+                'status': a.status,
+            }
+            for a in attendance_today_qs
+        ]
+
     return Response(payload)
 
 
@@ -691,7 +764,10 @@ def owner_vendors_list(request):
             return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
         return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
     if request.method == 'POST':
-        serializer = OwnerVendorCreateUpdateSerializer(data=request.data, context={'request': request})
+        serializer = OwnerVendorCreateUpdateSerializer(
+            data=request.data,
+            context={'request': request, 'owner_ids': owner_ids},
+        )
         if serializer.is_valid():
             serializer.save()
             return Response(
@@ -726,7 +802,10 @@ def owner_vendor_detail(request, pk):
         serializer = OwnerVendorListSerializer(vendor, context={'request': request})
         return Response(serializer.data)
     if request.method in ('PATCH', 'PUT'):
-        serializer = OwnerVendorCreateUpdateSerializer(vendor, data=request.data, partial=True, context={'request': request})
+        serializer = OwnerVendorCreateUpdateSerializer(
+            vendor, data=request.data, partial=True,
+            context={'request': request, 'owner_ids': owner_ids},
+        )
         if serializer.is_valid():
             serializer.save()
             return Response(OwnerVendorListSerializer(serializer.instance, context={'request': request}).data)
@@ -749,6 +828,349 @@ def owner_vendors_stats(request):
         'total_to_pay': str(agg['to_pay'] or 0),
         'total_to_receive': str(agg['to_receive'] or 0),
     })
+
+
+# --- Units (owner/manager scoped) ---
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def units_list(request):
+    """List units for owner/manager restaurants. POST to create."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        if request.method == 'POST':
+            return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
+        return Response({'results': []})
+    if request.method == 'POST':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if not data.get('restaurant') and len(owner_ids) == 1:
+            data['restaurant'] = owner_ids[0]
+        serializer = UnitCreateUpdateSerializer(
+            data=data,
+            context={'request': request, 'owner_ids': owner_ids},
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                UnitListSerializer(serializer.instance, context={'request': request}).data,
+                status=status.HTTP_201_CREATED,
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    qs = Unit.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant').order_by('name')
+    serializer = UnitListSerializer(qs, many=True, context={'request': request})
+    return Response({'results': serializer.data})
+
+
+@api_view(['GET', 'PATCH', 'PUT'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def unit_detail(request, pk):
+    """Get or update a single unit."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        unit = Unit.objects.select_related('restaurant').get(pk=pk)
+    except Unit.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if unit.restaurant_id not in owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'GET':
+        serializer = UnitListSerializer(unit, context={'request': request})
+        return Response(serializer.data)
+    if request.method in ('PATCH', 'PUT'):
+        serializer = UnitCreateUpdateSerializer(
+            unit, data=request.data, partial=True,
+            context={'request': request, 'owner_ids': owner_ids},
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(UnitListSerializer(serializer.instance, context={'request': request}).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+# --- Categories (owner/manager scoped) ---
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def categories_list(request):
+    """List categories for owner/manager restaurants with item_count. POST to create."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        if request.method == 'POST':
+            return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
+        return Response({'results': []})
+    if request.method == 'POST':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if not data.get('restaurant') and len(owner_ids) == 1:
+            data['restaurant'] = owner_ids[0]
+        serializer = CategoryCreateUpdateSerializer(
+            data=data,
+            context={'request': request, 'owner_ids': owner_ids},
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                CategoryListSerializer(serializer.instance, context={'request': request}).data,
+                status=status.HTTP_201_CREATED,
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    from .models import Product
+    qs = Category.objects.filter(restaurant_id__in=owner_ids).annotate(
+        item_count=Count('products', distinct=True),
+    ).select_related('restaurant').order_by('name')
+    serializer = CategoryListSerializer(qs, many=True, context={'request': request})
+    return Response({'results': serializer.data})
+
+
+@api_view(['GET', 'PATCH', 'PUT'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def category_detail(request, pk):
+    """Get or update a single category."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        category = Category.objects.select_related('restaurant').get(pk=pk)
+    except Category.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if category.restaurant_id not in owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'GET':
+        from .models import Product
+        category_with_count = Category.objects.filter(pk=pk, restaurant_id__in=owner_ids).annotate(
+            item_count=Count('products', distinct=True),
+        ).select_related('restaurant').first()
+        if not category_with_count:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = CategoryListSerializer(category_with_count, context={'request': request})
+        return Response(serializer.data)
+    if request.method in ('PATCH', 'PUT'):
+        serializer = CategoryCreateUpdateSerializer(
+            category, data=request.data, partial=True,
+            context={'request': request, 'owner_ids': owner_ids},
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(CategoryListSerializer(serializer.instance, context={'request': request}).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+# --- Raw materials (owner/manager scoped) ---
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def raw_materials_list(request):
+    """List raw materials for owner/manager restaurants. Optional low_stock=true, restaurant_id=."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'results': []})
+    qs = RawMaterial.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant', 'unit').order_by('name')
+    restaurant_id = request.query_params.get('restaurant_id')
+    if restaurant_id:
+        try:
+            rid = int(restaurant_id)
+            if rid in owner_ids:
+                qs = qs.filter(restaurant_id=rid)
+        except (TypeError, ValueError):
+            pass
+    if request.query_params.get('low_stock') == 'true':
+        qs = qs.filter(min_stock__isnull=False).filter(stock__lt=F('min_stock'))
+    results = [
+        {
+            'id': r.id,
+            'name': r.name,
+            'restaurant_id': r.restaurant_id,
+            'restaurant_name': r.restaurant.name if r.restaurant_id else '',
+            'unit_id': r.unit_id,
+            'unit_name': r.unit.name if r.unit_id else '',
+            'unit_symbol': r.unit.symbol if r.unit_id else '',
+            'stock': str(r.stock),
+            'min_stock': str(r.min_stock) if r.min_stock is not None else None,
+            'price': str(r.price),
+        }
+        for r in qs
+    ]
+    return Response({'results': results})
+
+
+# --- Orders list (owner/manager scoped) ---
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def orders_list(request):
+    """List orders for owner/manager restaurants. Filters: status, payment_status, start_date, end_date. Paginated."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    qs = Order.objects.filter(restaurant_id__in=owner_ids).annotate(
+        items_count=Count('items'),
+    ).select_related('table', 'waiter', 'waiter__user').order_by('-created_at')
+    status_param = request.query_params.get('status', '').strip()
+    if status_param:
+        qs = qs.filter(status=status_param)
+    payment_status_param = request.query_params.get('payment_status', '').strip()
+    if payment_status_param:
+        qs = qs.filter(payment_status=payment_status_param)
+    start_date = request.query_params.get('start_date', '').strip()[:10]
+    if start_date:
+        try:
+            qs = qs.filter(created_at__date__gte=start_date)
+        except (TypeError, ValueError):
+            pass
+    end_date = request.query_params.get('end_date', '').strip()[:10]
+    if end_date:
+        try:
+            qs = qs.filter(created_at__date__lte=end_date)
+        except (TypeError, ValueError):
+            pass
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    results = [
+        {
+            'id': o.id,
+            'restaurant_id': o.restaurant_id,
+            'table_id': o.table_id,
+            'table_number': o.table_number or (o.table.name if o.table_id else ''),
+            'order_type': o.order_type,
+            'total': str(o.total),
+            'status': o.status,
+            'payment_status': o.payment_status,
+            'items_count': getattr(o, 'items_count', 0),
+            'waiter_id': o.waiter_id,
+            'waiter_name': o.waiter.user.name if o.waiter and o.waiter.user_id else '',
+            'created_at': o.created_at.isoformat() if hasattr(o.created_at, 'isoformat') else str(o.created_at),
+        }
+        for o in page
+    ]
+    return paginator.get_paginated_response(results)
+
+
+# --- Products (owner/manager scoped) ---
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def products_list(request):
+    """List products for owner/manager restaurants. POST to create."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        if request.method == 'POST':
+            return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
+        return Response({'results': []})
+    if request.method == 'POST':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if not data.get('restaurant') and len(owner_ids) == 1:
+            data['restaurant'] = owner_ids[0]
+        serializer = ProductCreateUpdateSerializer(
+            data=data,
+            context={'request': request, 'owner_ids': owner_ids},
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                ProductDetailSerializer(serializer.instance, context={'request': request}).data,
+                status=status.HTTP_201_CREATED,
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    qs = Product.objects.filter(restaurant_id__in=owner_ids).select_related(
+        'category', 'restaurant',
+    ).prefetch_related('variants', 'variants__unit', 'raw_material_links').annotate(
+        raw_material_links_count=Count('raw_material_links', distinct=True),
+    ).order_by('name')
+    serializer = ProductListSerializer(qs, many=True, context={'request': request})
+    return Response({'results': serializer.data})
+
+
+@api_view(['GET', 'PATCH', 'PUT'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def product_detail(request, pk):
+    """Get or update a single product."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        product = Product.objects.select_related('category', 'restaurant').prefetch_related(
+            'variants', 'variants__unit', 'raw_material_links', 'raw_material_links__raw_material', 'raw_material_links__product_variant',
+        ).get(pk=pk)
+    except Product.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if product.restaurant_id not in owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'GET':
+        serializer = ProductDetailSerializer(product, context={'request': request})
+        return Response(serializer.data)
+    if request.method in ('PATCH', 'PUT'):
+        serializer = ProductCreateUpdateSerializer(
+            product, data=request.data, partial=True,
+            context={'request': request, 'owner_ids': owner_ids, 'product': product},
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(ProductDetailSerializer(serializer.instance, context={'request': request}).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+# --- Combos (owner/manager scoped) ---
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def combos_list(request):
+    """List combos for owner/manager restaurants. POST to create."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        if request.method == 'POST':
+            return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
+        return Response({'results': []})
+    if request.method == 'POST':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if not data.get('restaurant') and len(owner_ids) == 1:
+            data['restaurant'] = owner_ids[0]
+        serializer = ComboSetCreateUpdateSerializer(
+            data=data,
+            context={'request': request, 'owner_ids': owner_ids},
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                ComboSetDetailSerializer(serializer.instance, context={'request': request}).data,
+                status=status.HTTP_201_CREATED,
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    qs = ComboSet.objects.filter(restaurant_id__in=owner_ids).annotate(
+        products_count=Count('products', distinct=True),
+    ).prefetch_related('products').select_related('restaurant').order_by('name')
+    serializer = ComboSetListSerializer(qs, many=True, context={'request': request})
+    return Response({'results': serializer.data})
+
+
+@api_view(['GET', 'PATCH', 'PUT'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def combo_detail(request, pk):
+    """Get or update a single combo."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        combo = ComboSet.objects.prefetch_related('products').select_related('restaurant').get(pk=pk)
+    except ComboSet.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if combo.restaurant_id not in owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'GET':
+        serializer = ComboSetDetailSerializer(combo, context={'request': request})
+        return Response(serializer.data)
+    if request.method in ('PATCH', 'PUT'):
+        serializer = ComboSetCreateUpdateSerializer(
+            combo, data=request.data, partial=True,
+            context={'request': request, 'owner_ids': owner_ids},
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(ComboSetDetailSerializer(serializer.instance, context={'request': request}).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
 
 @api_view(['GET'])
