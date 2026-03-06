@@ -500,14 +500,25 @@ def owner_dashboard_stats(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_staff_available_users(request):
-    """List users that can be assigned as staff: only Customers or unassigned (no Staff row anywhere). Search by phone required."""
+    """List users that can be assigned as staff. Search by phone required. Excludes only users already staff at the given restaurant (or at any of owner's restaurants if no restaurant_id)."""
     owner_ids = _owner_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'results': []})
     search = (request.query_params.get('search') or '').strip()
     if not search:
         return Response({'results': []})
-    already_staff_user_ids = list(Staff.objects.values_list('user_id', flat=True).distinct())
+    restaurant_id_param = request.query_params.get('restaurant_id')
+    if restaurant_id_param is not None:
+        try:
+            restaurant_id = int(restaurant_id_param)
+        except (TypeError, ValueError):
+            restaurant_id = None
+    else:
+        restaurant_id = None
+    if restaurant_id is not None and restaurant_id in owner_ids:
+        already_staff_user_ids = list(Staff.objects.filter(restaurant_id=restaurant_id).values_list('user_id', flat=True))
+    else:
+        already_staff_user_ids = list(Staff.objects.filter(restaurant_id__in=owner_ids).values_list('user_id', flat=True).distinct())
     qs = User.objects.exclude(is_superuser=True).order_by('name', 'phone')
     if already_staff_user_ids:
         qs = qs.exclude(id__in=already_staff_user_ids)

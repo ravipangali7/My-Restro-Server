@@ -725,8 +725,6 @@ class OwnerStaffCreateUpdateSerializer(serializers.ModelSerializer):
         instance = self.instance
         if instance is not None and instance.user_id == value.id:
             return value
-        if Staff.objects.filter(user=value).exists():
-            raise serializers.ValidationError('This user is already staff at a restaurant.')
         return value
 
     def validate(self, attrs):
@@ -751,10 +749,19 @@ class OwnerStaffCreateUpdateSerializer(serializers.ModelSerializer):
             attrs['is_kitchen'] = role == 'kitchen'
             if not attrs.get('designation'):
                 attrs['designation'] = role
+        if not self.instance:
+            restaurant = attrs.get('restaurant')
+            user = attrs.get('user')
+            if restaurant and user and Staff.objects.filter(restaurant=restaurant, user=user).exists():
+                raise serializers.ValidationError('This user is already staff at this restaurant.')
         return attrs
 
     def create(self, validated_data):
-        return super().create(validated_data)
+        instance = super().create(validated_data)
+        user = instance.user
+        user.is_restaurant_staff = True
+        user.save(update_fields=['is_restaurant_staff'])
+        return instance
 
     def update(self, instance, validated_data):
         return super().update(instance, validated_data)
