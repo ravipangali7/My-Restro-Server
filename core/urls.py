@@ -55,7 +55,13 @@ urlpatterns = [
     path('purchases/<int:pk>/', views.purchase_detail),
     path('purchases/', views.purchases_list),
     # Orders (owner/manager)
+    path('orders/stats/', views.orders_stats),
     path('orders/', views.orders_list),
+    path('orders/<int:pk>/', views.order_detail),
+    # Expenses (owner/manager)
+    path('expenses/stats/', views.expenses_stats),
+    path('expenses/', views.expenses_list),
+    path('expenses/<int:pk>/', views.expense_detail),
     # Products (owner/manager)
     path('products/', views.products_list),
     path('products/<int:pk>/', views.product_detail),

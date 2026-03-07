@@ -21,6 +21,7 @@ from .models import (
     ComboSet,
     Attendance,
     Feedback,
+    Expenses,
 )
 
 
@@ -1204,3 +1205,74 @@ class ComboSetCreateUpdateSerializer(serializers.ModelSerializer):
         if product_ids is not None:
             instance.products.set(product_ids)
         return instance
+
+
+# --- Expenses (owner/manager) ---
+
+class ExpenseListSerializer(serializers.ModelSerializer):
+    """List representation: id, restaurant_id, category (name), description, amount, date (from created_at), image_url."""
+    category = serializers.CharField(source='name', read_only=True)
+    date = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Expenses
+        fields = ['id', 'restaurant_id', 'category', 'description', 'amount', 'date', 'image_url', 'created_at']
+
+    def get_date(self, obj):
+        return obj.created_at.date().isoformat() if obj.created_at else None
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+
+
+class ExpenseDetailSerializer(serializers.ModelSerializer):
+    """Detail: same as list + vendor_id, vendor_name, name (title)."""
+    category = serializers.CharField(source='name', read_only=True)
+    date = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
+    vendor_id = serializers.IntegerField(source='vendor_id', read_only=True, allow_null=True)
+    vendor_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Expenses
+        fields = [
+            'id', 'restaurant_id', 'name', 'category', 'description', 'amount',
+            'date', 'image_url', 'vendor_id', 'vendor_name', 'created_at', 'updated_at'
+        ]
+
+    def get_date(self, obj):
+        return obj.created_at.date().isoformat() if obj.created_at else None
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+
+    def get_vendor_name(self, obj):
+        return obj.vendor.name if obj.vendor_id else None
+
+
+class ExpenseCreateUpdateSerializer(serializers.ModelSerializer):
+    """Create/update: name (category/title), description, amount, image, restaurant, vendor (optional)."""
+    class Meta:
+        model = Expenses
+        fields = ['name', 'description', 'amount', 'image', 'restaurant', 'vendor']
+
+    def validate_restaurant(self, value):
+        owner_ids = self.context.get('owner_ids')
+        if owner_ids is not None and value.id not in owner_ids:
+            raise serializers.ValidationError('Restaurant not in your scope.')
+        return value
+
+    def validate_vendor(self, value):
+        if value is None:
+            return value
+        owner_ids = self.context.get('owner_ids')
+        if owner_ids is not None and value.restaurant_id not in owner_ids:
+            raise serializers.ValidationError('Vendor not in your scope.')
+        return value

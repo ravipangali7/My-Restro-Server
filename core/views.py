@@ -28,6 +28,7 @@ from .models import (
     Staff,
     Vendor,
     Order,
+    OrderItem,
     CustomerRestaurant,
     Attendance,
     PaidRecord,
@@ -42,6 +43,7 @@ from .models import (
     Purchase,
     PurchaseItem,
     Feedback,
+    Expenses,
 )
 from .models import PaymentStatus, DiscountType
 from .permissions import IsSuperuser, IsSuperuserOrOwner
@@ -88,6 +90,9 @@ from .serializers import (
     ComboSetListSerializer,
     ComboSetDetailSerializer,
     ComboSetCreateUpdateSerializer,
+    ExpenseListSerializer,
+    ExpenseDetailSerializer,
+    ExpenseCreateUpdateSerializer,
 )
 
 
@@ -1862,6 +1867,214 @@ def orders_list(request):
         for o in page
     ]
     return paginator.get_paginated_response(results)
+
+
+def _order_item_name(item):
+    """Return display name for an OrderItem (product, combo, or variant)."""
+    if item.product_id:
+        return item.product.name if item.product else f'Product #{item.product_id}'
+    if item.combo_set_id:
+        return item.combo_set.name if item.combo_set else f'Combo #{item.combo_set_id}'
+    if item.product_variant_id and item.product_variant:
+        p = item.product_variant.product_id
+        base = item.product_variant.product.name if p and getattr(item.product_variant, 'product', None) else f'Variant #{item.product_variant_id}'
+        return base
+    return 'Item'
+
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def order_detail(request, pk):
+    """Get or update a single order. PATCH allows status and payment_status."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        order = Order.objects.filter(restaurant_id__in=owner_ids).select_related(
+            'table', 'waiter', 'waiter__user'
+        ).prefetch_related('items__product', 'items__product_variant', 'items__product_variant__product', 'items__combo_set').get(pk=pk)
+    except Order.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'PATCH':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        allowed = {}
+        if 'status' in data and data['status']:
+            allowed['status'] = data['status'].strip()
+        if 'payment_status' in data and data['payment_status']:
+            allowed['payment_status'] = data['payment_status'].strip()
+        if allowed:
+            Order.objects.filter(pk=pk).update(**allowed)
+            order.refresh_from_db()
+    # Build detail response
+    items = []
+    subtotal = Decimal('0')
+    for item in order.items.all():
+        line_total = item.total
+        subtotal += line_total
+        items.append({
+            'id': item.id,
+            'name': _order_item_name(item),
+            'quantity': str(item.quantity),
+            'price': str(item.price),
+            'total': str(line_total),
+        })
+    return Response({
+        'id': order.id,
+        'restaurant_id': order.restaurant_id,
+        'table_id': order.table_id,
+        'table_number': order.table_number or (order.table.name if order.table_id else ''),
+        'order_type': order.order_type,
+        'status': order.status,
+        'payment_status': order.payment_status,
+        'payment_method': order.payment_method or '',
+        'waiter_id': order.waiter_id,
+        'waiter_name': order.waiter.user.name if order.waiter and order.waiter.user_id else '',
+        'subtotal': str(subtotal),
+        'service_charge': str(order.service_charge) if order.service_charge is not None else None,
+        'discount': str(order.discount) if order.discount is not None else None,
+        'total': str(order.total),
+        'created_at': order.created_at.isoformat() if hasattr(order.created_at, 'isoformat') else str(order.created_at),
+        'updated_at': order.updated_at.isoformat() if hasattr(order.updated_at, 'isoformat') else str(order.updated_at),
+        'items': items,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def orders_stats(request):
+    """Stats for listing/dashboard: today_orders_count, pending_count, revenue_today, by_status."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({
+            'today_orders_count': 0,
+            'pending_count': 0,
+            'revenue_today': '0',
+            'by_status': {},
+        })
+    today = timezone.now().date()
+    qs = Order.objects.filter(restaurant_id__in=owner_ids)
+    today_qs = qs.filter(created_at__date=today)
+    today_orders_count = today_qs.count()
+    pending_count = qs.filter(status='pending').count()
+    revenue_today = today_qs.filter(payment_status='paid').aggregate(s=Sum('total'))['s'] or Decimal('0')
+    by_status = dict(qs.values('status').annotate(c=Count('id')).values_list('status', 'c'))
+    return Response({
+        'today_orders_count': today_orders_count,
+        'pending_count': pending_count,
+        'revenue_today': str(revenue_today),
+        'by_status': by_status,
+    })
+
+
+# --- Expenses (owner/manager scoped) ---
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def expenses_list(request):
+    """List or create expenses. GET: optional restaurant, start_date, end_date. POST: create (restaurant from body or single allowed)."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        if request.method == 'POST':
+            return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    if request.method == 'POST':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if not data.get('restaurant') and len(owner_ids) == 1:
+            data['restaurant'] = owner_ids[0]
+        if data.get('restaurant') and int(data.get('restaurant')) not in owner_ids:
+            return Response({'detail': 'Restaurant not in your scope.'}, status=status.HTTP_403_FORBIDDEN)
+        serializer = ExpenseCreateUpdateSerializer(
+            data=data,
+            context={'request': request, 'owner_ids': owner_ids},
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                ExpenseDetailSerializer(serializer.instance, context={'request': request}).data,
+                status=status.HTTP_201_CREATED,
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    qs = Expenses.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant', 'vendor').order_by('-created_at')
+    restaurant_param = request.query_params.get('restaurant', '').strip()
+    if restaurant_param:
+        try:
+            rid = int(restaurant_param)
+            if rid in owner_ids:
+                qs = qs.filter(restaurant_id=rid)
+        except ValueError:
+            pass
+    start_date = request.query_params.get('start_date', '').strip()[:10]
+    if start_date:
+        try:
+            qs = qs.filter(created_at__date__gte=start_date)
+        except (TypeError, ValueError):
+            pass
+    end_date = request.query_params.get('end_date', '').strip()[:10]
+    if end_date:
+        try:
+            qs = qs.filter(created_at__date__lte=end_date)
+        except (TypeError, ValueError):
+            pass
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = ExpenseListSerializer(page, many=True, context={'request': request})
+    return paginator.get_paginated_response(serializer.data)
+
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def expense_detail(request, pk):
+    """Get or update a single expense."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        expense = Expenses.objects.select_related('restaurant', 'vendor').get(pk=pk, restaurant_id__in=owner_ids)
+    except Expenses.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'PATCH':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        serializer = ExpenseCreateUpdateSerializer(
+            expense, data=data, partial=True,
+            context={'request': request, 'owner_ids': owner_ids},
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(ExpenseDetailSerializer(serializer.instance, context={'request': request}).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    serializer = ExpenseDetailSerializer(expense, context={'request': request})
+    return Response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def expenses_stats(request):
+    """Total amount and count for period; optional by_category (aggregate by name)."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'total_amount': '0', 'count': 0, 'by_category': []})
+    qs = Expenses.objects.filter(restaurant_id__in=owner_ids)
+    start_date = request.query_params.get('start_date', '').strip()[:10]
+    end_date = request.query_params.get('end_date', '').strip()[:10]
+    if start_date:
+        try:
+            qs = qs.filter(created_at__date__gte=start_date)
+        except (TypeError, ValueError):
+            pass
+    if end_date:
+        try:
+            qs = qs.filter(created_at__date__lte=end_date)
+        except (TypeError, ValueError):
+            pass
+    agg = qs.aggregate(total=Sum('amount'), count=Count('id'))
+    by_category = list(
+        qs.values('name').annotate(total=Sum('amount'), count=Count('id')).order_by('-total')
+    )
+    return Response({
+        'total_amount': str(agg['total'] or 0),
+        'count': agg['count'] or 0,
+        'by_category': [{'category': b['name'], 'total': str(b['total']), 'count': b['count']} for b in by_category],
+    })
 
 
 # --- Products (owner/manager scoped) ---
