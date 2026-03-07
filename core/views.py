@@ -1,4 +1,4 @@
-from django.db.models import Q, Sum, Count, F
+from django.db.models import Q, Sum, Count, F, Avg
 from django.db.models.functions import Coalesce
 from django.db.models import Value
 from django.db.models.functions import TruncDate, TruncMonth
@@ -41,6 +41,7 @@ from .models import (
     ComboSet,
     Purchase,
     PurchaseItem,
+    Feedback,
 )
 from .models import PaymentStatus, DiscountType
 from .permissions import IsSuperuser, IsSuperuserOrOwner
@@ -71,6 +72,10 @@ from .serializers import (
     CustomerListSerializer,
     OwnerStaffListSerializer,
     OwnerStaffCreateUpdateSerializer,
+    AttendanceListSerializer,
+    AttendanceUpdateSerializer,
+    FeedbackListSerializer,
+    FeedbackDetailSerializer,
     OwnerVendorListSerializer,
     OwnerVendorCreateUpdateSerializer,
     UnitListSerializer,
@@ -632,7 +637,10 @@ def owner_staff_list(request):
             return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
         return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
     if request.method == 'POST':
-        serializer = OwnerStaffCreateUpdateSerializer(data=request.data, context={'request': request})
+        serializer = OwnerStaffCreateUpdateSerializer(
+            data=request.data,
+            context={'request': request, 'owner_ids': owner_ids},
+        )
         if serializer.is_valid():
             serializer.save()
             return Response(
@@ -640,7 +648,27 @@ def owner_staff_list(request):
                 status=status.HTTP_201_CREATED,
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    qs = Staff.objects.filter(restaurant_id__in=owner_ids).select_related('user', 'restaurant').order_by('restaurant__name', 'user__name')
+    qs = Staff.objects.filter(restaurant_id__in=owner_ids).select_related('user', 'restaurant').prefetch_related('assigned_tables').order_by('restaurant__name', 'user__name')
+    include_attendance_days = request.query_params.get('include_attendance_days', '').strip() == '1'
+    start_date_param = request.query_params.get('start_date', '').strip()
+    end_date_param = request.query_params.get('end_date', '').strip()
+    if include_attendance_days and start_date_param and end_date_param:
+        try:
+            start_dt = datetime.strptime(start_date_param, '%Y-%m-%d').date()
+            end_dt = datetime.strptime(end_date_param, '%Y-%m-%d').date()
+            if start_dt <= end_dt:
+                qs = qs.annotate(
+                    attendance_days=Count(
+                        'attendances',
+                        filter=Q(
+                            attendances__status=AttendanceStatus.PRESENT,
+                            attendances__date__gte=start_dt,
+                            attendances__date__lte=end_dt,
+                        ),
+                    ),
+                )
+        except (ValueError, TypeError):
+            pass
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(
@@ -685,7 +713,7 @@ def owner_staff_detail(request, pk):
     if owner_ids is None or not owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     try:
-        staff = Staff.objects.select_related('user', 'restaurant').get(pk=pk)
+        staff = Staff.objects.select_related('user', 'restaurant').prefetch_related('assigned_tables').get(pk=pk)
     except Staff.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if staff.restaurant_id not in owner_ids:
@@ -694,12 +722,235 @@ def owner_staff_detail(request, pk):
         serializer = OwnerStaffListSerializer(staff, context={'request': request})
         return Response(serializer.data)
     if request.method in ('PATCH', 'PUT'):
-        serializer = OwnerStaffCreateUpdateSerializer(staff, data=request.data, partial=True, context={'request': request})
+        serializer = OwnerStaffCreateUpdateSerializer(
+            staff, data=request.data, partial=True,
+            context={'request': request, 'owner_ids': owner_ids},
+        )
         if serializer.is_valid():
             serializer.save()
             return Response(OwnerStaffListSerializer(serializer.instance, context={'request': request}).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+# --- Attendance (owner/manager) ---
+
+def _owner_attendance_list_for_date(owner_ids, restaurant_id, att_date):
+    staff_list = list(Staff.objects.filter(restaurant_id=restaurant_id).select_related('user').order_by('user__name'))
+    attendance_by_staff = {
+        a.staff_id: a
+        for a in Attendance.objects.filter(restaurant_id=restaurant_id, date=att_date).select_related('staff', 'staff__user')
+    }
+    results = []
+    for s in staff_list:
+        att = attendance_by_staff.get(s.id)
+        if att:
+            results.append({
+                'id': att.id,
+                'staff_id': s.id,
+                'staff_name': s.user.name or '',
+                'status': att.status.lower(),
+                'leave_reason': att.leave_reason or '',
+                'created_at': att.created_at.isoformat() if att.created_at else None,
+            })
+        else:
+            results.append({
+                'id': None,
+                'staff_id': s.id,
+                'staff_name': s.user.name or '',
+                'status': 'unmarked',
+                'leave_reason': '',
+                'created_at': None,
+            })
+    present = sum(1 for r in results if r['status'] == 'present')
+    absent = sum(1 for r in results if r['status'] == 'absent')
+    leave = sum(1 for r in results if r['status'] == 'leave')
+    return {'results': results, 'stats': {'present': present, 'absent': absent, 'leave': leave, 'total_staff': len(results)}}
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_attendance_list(request):
+    """GET: list attendance for a restaurant on a given date. POST: create attendance record (for unmarked staff)."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        if request.method == 'POST':
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'results': [], 'stats': {'present': 0, 'absent': 0, 'leave': 0, 'total_staff': 0}})
+    if request.method == 'POST':
+        rid = request.data.get('restaurant_id')
+        sid = request.data.get('staff_id')
+        date_param = request.data.get('date')
+        if rid is None or sid is None or not date_param:
+            return Response({'detail': 'restaurant_id, staff_id and date required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            rid = int(rid)
+            sid = int(sid)
+            att_date = datetime.strptime(str(date_param).strip()[:10], '%Y-%m-%d').date()
+        except (ValueError, TypeError):
+            return Response({'detail': 'Invalid restaurant_id, staff_id or date.'}, status=status.HTTP_400_BAD_REQUEST)
+        if rid not in owner_ids:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        staff = Staff.objects.filter(restaurant_id=rid, id=sid).first()
+        if not staff:
+            return Response({'detail': 'Staff not found.'}, status=status.HTTP_404_NOT_FOUND)
+        status_val = (request.data.get('status') or 'absent').strip().lower()
+        if status_val not in ('present', 'absent', 'leave'):
+            status_val = 'absent'
+        leave_reason = (request.data.get('leave_reason') or '').strip()
+        att, created = Attendance.objects.get_or_create(
+            restaurant_id=rid, staff=staff, date=att_date,
+            defaults={'status': status_val, 'leave_reason': leave_reason},
+        )
+        if not created:
+            att.status = status_val
+            att.leave_reason = leave_reason
+            att.save()
+        return Response({
+            'id': att.id,
+            'staff_id': att.staff_id,
+            'staff_name': att.staff.user.name or '',
+            'status': att.status,
+            'leave_reason': att.leave_reason or '',
+            'created_at': att.created_at.isoformat() if att.created_at else None,
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+    restaurant_id_param = request.query_params.get('restaurant_id', '').strip()
+    date_param = request.query_params.get('date', '').strip()
+    if not date_param:
+        return Response({'detail': 'date (YYYY-MM-DD) required.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        att_date = datetime.strptime(date_param, '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        return Response({'detail': 'Invalid date format. Use YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
+    restaurant_id = int(restaurant_id_param) if restaurant_id_param else (owner_ids[0] if len(owner_ids) == 1 else None)
+    if restaurant_id is None or restaurant_id not in owner_ids:
+        return Response({'detail': 'Valid restaurant_id required.'}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(_owner_attendance_list_for_date(owner_ids, restaurant_id, att_date))
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_attendance_stats(request):
+    """Stats for attendance on a given date: present, absent, leave, total_staff."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'present': 0, 'absent': 0, 'leave': 0, 'total_staff': 0})
+    restaurant_id_param = request.query_params.get('restaurant_id', '').strip()
+    date_param = request.query_params.get('date', '').strip()
+    if not date_param:
+        return Response({'detail': 'date (YYYY-MM-DD) required.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        att_date = datetime.strptime(date_param, '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        return Response({'detail': 'Invalid date format.'}, status=status.HTTP_400_BAD_REQUEST)
+    restaurant_id = int(restaurant_id_param) if restaurant_id_param else owner_ids[0]
+    if restaurant_id not in owner_ids:
+        return Response({'present': 0, 'absent': 0, 'leave': 0, 'total_staff': 0})
+    total_staff = Staff.objects.filter(restaurant_id=restaurant_id).count()
+    agg = Attendance.objects.filter(restaurant_id=restaurant_id, date=att_date).values('status').annotate(c=Count('id'))
+    counts = {r['status'].lower(): r['c'] for r in agg}
+    return Response({
+        'present': counts.get('present', 0),
+        'absent': counts.get('absent', 0),
+        'leave': counts.get('leave', 0),
+        'total_staff': total_staff,
+    })
+
+
+@api_view(['GET', 'PATCH', 'PUT'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_attendance_detail(request, pk):
+    """Get or update a single attendance record by id."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        att = Attendance.objects.select_related('staff', 'staff__user').get(pk=pk)
+    except Attendance.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if att.restaurant_id not in owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'GET':
+        return Response({
+            'id': att.id,
+            'staff_id': att.staff_id,
+            'staff_name': att.staff.user.name or '',
+            'status': att.status,
+            'leave_reason': att.leave_reason or '',
+            'created_at': att.created_at.isoformat() if att.created_at else None,
+        })
+    if request.method in ('PATCH', 'PUT'):
+        serializer = AttendanceUpdateSerializer(att, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            att.refresh_from_db()
+            return Response({
+                'id': att.id,
+                'staff_id': att.staff_id,
+                'staff_name': att.staff.user.name or '',
+                'status': att.status,
+                'leave_reason': att.leave_reason or '',
+                'created_at': att.created_at.isoformat() if att.created_at else None,
+            })
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+# --- Feedback (owner/manager) ---
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_feedback_list(request):
+    """List feedback for owner/manager restaurants. Optional restaurant_id, pagination."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    restaurant_id_param = request.query_params.get('restaurant_id', '').strip()
+    restaurant_id = int(restaurant_id_param) if restaurant_id_param else (owner_ids[0] if len(owner_ids) == 1 else None)
+    if restaurant_id is None or restaurant_id not in owner_ids:
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    qs = Feedback.objects.filter(restaurant_id=restaurant_id).select_related('customer', 'order').order_by('-created_at')
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = FeedbackListSerializer(page, many=True, context={'request': request})
+    return paginator.get_paginated_response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_feedback_stats(request):
+    """Feedback stats: average_rating, total_count, count_by_rating (1-5)."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'average_rating': 0, 'total_count': 0, 'count_by_rating': {str(i): 0 for i in range(1, 6)}})
+    restaurant_id_param = request.query_params.get('restaurant_id', '').strip()
+    restaurant_id = int(restaurant_id_param) if restaurant_id_param else owner_ids[0]
+    if restaurant_id not in owner_ids:
+        return Response({'average_rating': 0, 'total_count': 0, 'count_by_rating': {str(i): 0 for i in range(1, 6)}})
+    qs = Feedback.objects.filter(restaurant_id=restaurant_id)
+    total = qs.count()
+    avg = qs.aggregate(a=Avg('rating'))['a']
+    average_rating = round(float(avg or 0), 1)
+    by_rating = dict(qs.values('rating').annotate(c=Count('id')).values_list('rating', 'c'))
+    count_by_rating = {str(i): by_rating.get(i, 0) for i in range(1, 6)}
+    return Response({'average_rating': average_rating, 'total_count': total, 'count_by_rating': count_by_rating})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_feedback_detail(request, pk):
+    """Get a single feedback by id."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        fb = Feedback.objects.select_related('customer', 'order').get(pk=pk)
+    except Feedback.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if fb.restaurant_id not in owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    serializer = FeedbackDetailSerializer(fb, context={'request': request})
+    return Response(serializer.data)
 
 
 @api_view(['GET'])

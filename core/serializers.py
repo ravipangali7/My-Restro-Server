@@ -19,6 +19,8 @@ from .models import (
     ProductRawMaterial,
     RawMaterial,
     ComboSet,
+    Attendance,
+    Feedback,
 )
 
 
@@ -702,13 +704,16 @@ class OwnerStaffListSerializer(serializers.ModelSerializer):
     restaurant_id = serializers.IntegerField(source='restaurant.id', read_only=True)
     role = serializers.SerializerMethodField()
     is_active = serializers.SerializerMethodField()
+    user_image_url = serializers.SerializerMethodField()
+    assigned_table_ids = serializers.SerializerMethodField()
+    attendance_days = serializers.SerializerMethodField()
 
     class Meta:
         model = Staff
         fields = [
             'id', 'name', 'phone', 'country_code', 'restaurant_id', 'restaurant_name',
             'role', 'per_day_salary', 'to_pay', 'to_receive', 'is_suspend',
-            'is_active', 'created_at',
+            'is_active', 'created_at', 'user_image_url', 'assigned_table_ids', 'attendance_days',
         ]
 
     def get_role(self, obj):
@@ -723,17 +728,37 @@ class OwnerStaffListSerializer(serializers.ModelSerializer):
     def get_is_active(self, obj):
         return not obj.is_suspend
 
+    def get_user_image_url(self, obj):
+        if not obj.user or not obj.user.image:
+            return None
+        request = self.context.get('request')
+        return _build_media_url(request, obj.user.image.url if hasattr(obj.user.image, 'url') else str(obj.user.image))
+
+    def get_assigned_table_ids(self, obj):
+        if not hasattr(obj, 'assigned_tables'):
+            return []
+        return list(obj.assigned_tables.values_list('id', flat=True))
+
+    def get_attendance_days(self, obj):
+        return getattr(obj, 'attendance_days', None)
+
 
 class OwnerStaffCreateUpdateSerializer(serializers.ModelSerializer):
     role = serializers.ChoiceField(choices=['manager', 'waiter', 'kitchen'], write_only=True, required=False)
     monthly_salary = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True, min_value=0)
+    assigned_tables = serializers.ListField(child=serializers.IntegerField(), required=False, allow_empty=True)
 
     class Meta:
         model = Staff
-        fields = ['restaurant', 'user', 'role', 'designation', 'monthly_salary', 'per_day_salary']
+        fields = ['restaurant', 'user', 'role', 'designation', 'monthly_salary', 'per_day_salary', 'assigned_tables', 'joined_at']
 
     def validate_restaurant(self, value):
         request = self.context.get('request')
+        owner_ids = self.context.get('owner_ids')
+        if owner_ids is not None:
+            if not request.user.is_superuser and value.id not in owner_ids:
+                raise serializers.ValidationError('You can only add staff to restaurants you manage.')
+            return value
         if not request:
             return value
         owner_ids = list(Restaurant.objects.filter(user=request.user).values_list('id', flat=True))
@@ -777,14 +802,77 @@ class OwnerStaffCreateUpdateSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
+        assigned_table_ids = validated_data.pop('assigned_tables', [])
         instance = super().create(validated_data)
+        if assigned_table_ids:
+            instance.assigned_tables.set(assigned_table_ids)
         user = instance.user
         user.is_restaurant_staff = True
         user.save(update_fields=['is_restaurant_staff'])
         return instance
 
     def update(self, instance, validated_data):
-        return super().update(instance, validated_data)
+        assigned_table_ids = validated_data.pop('assigned_tables', None)
+        instance = super().update(instance, validated_data)
+        if assigned_table_ids is not None:
+            instance.assigned_tables.set(assigned_table_ids)
+        return instance
+
+
+# --- Attendance (owner/manager) ---
+
+class AttendanceListSerializer(serializers.ModelSerializer):
+    staff_id = serializers.IntegerField(source='staff.id', read_only=True)
+    staff_name = serializers.CharField(source='staff.user.name', read_only=True)
+
+    class Meta:
+        model = Attendance
+        fields = ['id', 'staff_id', 'staff_name', 'status', 'leave_reason', 'created_at']
+
+
+class AttendanceUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Attendance
+        fields = ['status', 'leave_reason']
+
+    def validate_status(self, value):
+        if value and value.lower() not in ('present', 'absent', 'leave'):
+            raise serializers.ValidationError('Status must be present, absent, or leave.')
+        return value.lower() if value else value
+
+
+# --- Feedback (owner/manager) ---
+
+class FeedbackListSerializer(serializers.ModelSerializer):
+    customer_name = serializers.CharField(source='customer.name', read_only=True)
+    order_id = serializers.IntegerField(source='order.id', read_only=True, allow_null=True)
+
+    class Meta:
+        model = Feedback
+        fields = ['id', 'customer_name', 'order_id', 'rating', 'review', 'created_at']
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if data.get('customer_name') is None or data.get('customer_name') == '':
+            data['customer_name'] = 'Anonymous'
+        data['comment'] = data.get('review', '')
+        return data
+
+
+class FeedbackDetailSerializer(serializers.ModelSerializer):
+    customer_name = serializers.CharField(source='customer.name', read_only=True)
+    order_id = serializers.IntegerField(source='order.id', read_only=True, allow_null=True)
+
+    class Meta:
+        model = Feedback
+        fields = ['id', 'customer_name', 'order_id', 'rating', 'review', 'created_at']
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if data.get('customer_name') is None or data.get('customer_name') == '':
+            data['customer_name'] = 'Anonymous'
+        data['comment'] = data.get('review', '')
+        return data
 
 
 class OwnerVendorListSerializer(serializers.ModelSerializer):
