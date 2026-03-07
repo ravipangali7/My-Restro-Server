@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, time
 from decimal import Decimal
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 
@@ -601,7 +601,47 @@ def owner_dashboard_stats(request):
             for a in attendance_today_qs
         ]
 
+        # Customers count (distinct customers with orders at these restaurants)
+        customers_count = Customer.objects.filter(
+            orders__restaurant_id__in=owner_ids,
+        ).distinct().count()
+        payload['customers_count'] = customers_count
+
+        # Single restaurant: include slug, name, logo for manager dashboard / Menu QR
+        if len(owner_ids) == 1:
+            single_rest = Restaurant.objects.filter(id=owner_ids[0]).first()
+            if single_rest:
+                from .serializers import _build_media_url
+                logo_url = None
+                if single_rest.logo:
+                    logo_url = _build_media_url(request, single_rest.logo.url if hasattr(single_rest.logo, 'url') else str(single_rest.logo))
+                payload['restaurant_slug'] = single_rest.slug
+                payload['restaurant_name'] = single_rest.name
+                payload['restaurant_logo_url'] = logo_url
+
     return Response(payload)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_my_restaurant(request):
+    """Return current manager's restaurant (id, slug, name, logo_url). For staff with single restaurant only."""
+    manager_rid = _manager_restaurant_id(request)
+    if manager_rid is None:
+        return Response({'detail': 'Not available.'}, status=status.HTTP_404_NOT_FOUND)
+    rest = Restaurant.objects.filter(id=manager_rid).first()
+    if not rest:
+        return Response({'detail': 'Restaurant not found.'}, status=status.HTTP_404_NOT_FOUND)
+    from .serializers import _build_media_url
+    logo_url = None
+    if rest.logo:
+        logo_url = _build_media_url(request, rest.logo.url if hasattr(rest.logo, 'url') else str(rest.logo))
+    return Response({
+        'id': rest.id,
+        'slug': rest.slug,
+        'name': rest.name,
+        'logo_url': logo_url,
+    })
 
 
 @api_view(['GET'])
@@ -3770,6 +3810,168 @@ def notification_stats(request):
         'sms': sms,
         'whatsapp': whatsapp,
     })
+
+
+# ---------- Public (no auth): menu by slug & guest order ----------
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def public_menu_by_slug(request, slug):
+    """Return restaurant info + categories + active products for public QR menu. No auth."""
+    rest = Restaurant.objects.filter(slug=slug).first()
+    if not rest:
+        return Response({'detail': 'Restaurant not found.'}, status=status.HTTP_404_NOT_FOUND)
+    from .serializers import _build_media_url
+    logo_url = None
+    if rest.logo:
+        logo_url = _build_media_url(request, rest.logo.url if hasattr(rest.logo, 'url') else str(rest.logo))
+    categories_qs = Category.objects.filter(restaurant=rest).order_by('name')
+    categories_data = []
+    for c in categories_qs:
+        cat_image_url = None
+        if c.image:
+            cat_image_url = _build_media_url(request, c.image.url if hasattr(c.image, 'url') else str(c.image))
+        categories_data.append({
+            'id': c.id,
+            'name': c.name,
+            'image_url': cat_image_url,
+        })
+    products_qs = Product.objects.filter(
+        restaurant=rest,
+        is_active=True,
+    ).select_related('category').prefetch_related('variants', 'variants__unit').order_by('category__name', 'name')
+    products_data = []
+    for p in products_qs:
+        img_url = None
+        if p.image:
+            img_url = _build_media_url(request, p.image.url if hasattr(p.image, 'url') else str(p.image))
+        variants_data = []
+        for v in p.variants.all():
+            variants_data.append({
+                'id': v.id,
+                'unit_name': v.unit.name if v.unit_id else '',
+                'unit_symbol': v.unit.symbol or '',
+                'price': str(v.get_final_price()),
+            })
+        products_data.append({
+            'id': p.id,
+            'name': p.name,
+            'category_id': p.category_id,
+            'category_name': p.category.name if p.category_id else '',
+            'image_url': img_url,
+            'dish_type': getattr(p, 'dish_type', 'veg'),
+            'variants': variants_data,
+        })
+    return Response({
+        'restaurant': {
+            'id': rest.id,
+            'name': rest.name,
+            'slug': rest.slug,
+            'logo_url': logo_url,
+            'address': rest.address or '',
+            'phone': rest.phone or '',
+            'is_open': rest.is_open,
+        },
+        'categories': categories_data,
+        'products': products_data,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def public_order_create(request, slug):
+    """Create order for restaurant by slug (guest). Body: phone, name?, country_code?, items: [{ product_id or product_variant_id, quantity }]."""
+    rest = Restaurant.objects.filter(slug=slug).first()
+    if not rest:
+        return Response({'detail': 'Restaurant not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if not rest.is_open:
+        return Response({'detail': 'Restaurant is currently closed.'}, status=status.HTTP_400_BAD_REQUEST)
+    data = request.data if hasattr(request.data, 'get') else {}
+    phone = (data.get('phone') or '').strip()
+    if not phone:
+        return Response({'detail': 'Phone is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    name = (data.get('name') or '').strip() or None
+    country_code = (data.get('country_code') or '').strip() or None
+    items_data = data.get('items') or []
+    if not items_data:
+        return Response({'detail': 'At least one item is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    from .services import get_or_create_customer_for_restaurant
+    customer, _ = get_or_create_customer_for_restaurant(rest, phone, name=name, country_code=country_code)
+    if not customer:
+        return Response({'detail': 'Invalid customer.'}, status=status.HTTP_400_BAD_REQUEST)
+    order_total = Decimal('0')
+    line_items = []
+    for row in items_data:
+        qty = Decimal(str(row.get('quantity') or 1))
+        if qty <= 0:
+            continue
+        pv_id = row.get('product_variant_id')
+        prod_id = row.get('product_id')
+        unit_price = None
+        product_variant_id = None
+        product_id = None
+        if pv_id:
+            try:
+                pv = ProductVariant.objects.select_related('product').get(
+                    pk=pv_id, product__restaurant_id=rest.id
+                )
+                unit_price = pv.get_final_price()
+                product_variant_id = pv.id
+                product_id = pv.product_id
+            except (ProductVariant.DoesNotExist, TypeError, ValueError):
+                pass
+        if unit_price is None and prod_id:
+            try:
+                prod = Product.objects.filter(pk=prod_id, restaurant_id=rest.id, is_active=True).first()
+                if prod:
+                    first_v = prod.variants.first()
+                    if first_v:
+                        unit_price = first_v.get_final_price()
+                        product_variant_id = first_v.id
+                        product_id = prod.id
+            except Exception:
+                pass
+        if unit_price is not None and (product_variant_id or product_id):
+            line_total = unit_price * qty
+            order_total += line_total
+            line_items.append({
+                'product_id': product_id,
+                'product_variant_id': product_variant_id,
+                'price': unit_price,
+                'quantity': qty,
+                'total': line_total,
+            })
+    if not line_items:
+        return Response({'detail': 'No valid items.'}, status=status.HTTP_400_BAD_REQUEST)
+    order = Order.objects.create(
+        restaurant_id=rest.id,
+        customer_id=customer.id,
+        table_id=None,
+        table_number=None,
+        order_type=OrderType.PACKING,
+        address=None,
+        status='pending',
+        payment_status='pending',
+        payment_method=data.get('payment_method') or '',
+        waiter_id=None,
+        total=order_total,
+        service_charge=None,
+    )
+    for line in line_items:
+        OrderItem.objects.create(
+            order=order,
+            product_id=line.get('product_id'),
+            product_variant_id=line.get('product_variant_id'),
+            combo_set_id=None,
+            price=line['price'],
+            quantity=line['quantity'],
+            total=line['total'],
+        )
+    return Response({
+        'order_id': order.id,
+        'total': str(order.total),
+        'message': 'Order placed successfully.',
+    }, status=status.HTTP_201_CREATED)
 
 
 # ---------- Customers (super admin, for receiver picker) ----------

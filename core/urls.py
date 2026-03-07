@@ -9,6 +9,7 @@ urlpatterns = [
     path('auth/logout/', auth_views.logout),
     # Owner (scoped dashboard and lists)
     path('owner/dashboard-stats/', views.owner_dashboard_stats),
+    path('owner/my-restaurant/', views.owner_my_restaurant),
     path('owner/staff/', views.owner_staff_list),
     path('owner/staff/stats/', views.owner_staff_stats),
     path('owner/staff/available-users/', views.owner_staff_available_users),
@@ -117,6 +118,9 @@ urlpatterns = [
     path('notifications/', views.notification_list),
     path('notifications/<int:pk>/', views.notification_detail),
     path('notifications/<int:pk>/send/', views.notification_send),
+    # Public (no auth)
+    path('public/menu/<slug:slug>/', views.public_menu_by_slug),
+    path('public/restaurant/<slug:slug>/order/', views.public_order_create),
     # Customers (super admin, for receiver picker)
     path('customers/', views.customer_list),
 ]
