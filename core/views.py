@@ -2379,8 +2379,12 @@ def products_list(request):
         )
         if serializer.is_valid():
             serializer.save()
+            product = Product.objects.select_related('category', 'restaurant').prefetch_related(
+                'variants', 'variants__unit', 'raw_material_links',
+                'raw_material_links__raw_material', 'raw_material_links__product_variant',
+            ).get(pk=serializer.instance.pk)
             return Response(
-                ProductDetailSerializer(serializer.instance, context={'request': request}).data,
+                ProductDetailSerializer(product, context={'request': request}).data,
                 status=status.HTTP_201_CREATED,
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -2440,7 +2444,11 @@ def product_detail(request, pk):
         )
         if serializer.is_valid():
             serializer.save()
-            return Response(ProductDetailSerializer(serializer.instance, context={'request': request}).data)
+            product = Product.objects.select_related('category', 'restaurant').prefetch_related(
+                'variants', 'variants__unit', 'raw_material_links',
+                'raw_material_links__raw_material', 'raw_material_links__product_variant',
+            ).get(pk=pk)
+            return Response(ProductDetailSerializer(product, context={'request': request}).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
