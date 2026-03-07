@@ -1000,6 +1000,8 @@ def owner_attendance_detail(request, pk):
             'created_at': att.created_at.isoformat() if att.created_at else None,
         })
     if request.method in ('PATCH', 'PUT'):
+        if current_staff is not None and not current_staff.is_manager:
+            return Response({'detail': 'Waiter cannot edit attendance.'}, status=status.HTTP_403_FORBIDDEN)
         serializer = AttendanceUpdateSerializer(att, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -1590,6 +1592,9 @@ def tables_list(request):
             return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
         return Response({'results': []})
     if request.method == 'POST':
+        current_staff = _current_staff(request)
+        if current_staff is not None and not current_staff.is_manager:
+            return Response({'detail': 'Waiter cannot create tables.'}, status=status.HTTP_403_FORBIDDEN)
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
         restaurant_id = data.get('restaurant')
         if not restaurant_id and len(owner_ids) == 1:
@@ -1702,6 +1707,9 @@ def table_detail(request, pk):
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if t.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    current_staff = _current_staff(request)
+    if current_staff is not None and not current_staff.is_manager and request.method in ('PATCH', 'PUT', 'DELETE'):
+        return Response({'detail': 'Waiter cannot edit or delete tables.'}, status=status.HTTP_403_FORBIDDEN)
     if request.method == 'DELETE':
         t.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -2202,6 +2210,9 @@ def orders_list(request):
     qs = Order.objects.filter(restaurant_id__in=owner_ids).annotate(
         items_count=Count('items'),
     ).select_related('table', 'waiter', 'waiter__user').order_by('-created_at')
+    current_staff = _current_staff(request)
+    if current_staff is not None and not current_staff.is_manager:
+        qs = qs.filter(waiter_id=current_staff.id)
     status_param = request.query_params.get('status', '').strip()
     if status_param:
         qs = qs.filter(status=status_param)
@@ -2268,6 +2279,9 @@ def order_detail(request, pk):
         ).prefetch_related('items__product', 'items__product_variant', 'items__product_variant__product', 'items__combo_set').get(pk=pk)
     except Order.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    current_staff = _current_staff(request)
+    if current_staff is not None and not current_staff.is_manager and order.waiter_id != current_staff.id:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'PATCH':
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
         allowed = {}
@@ -2326,6 +2340,9 @@ def orders_stats(request):
         })
     today = timezone.now().date()
     qs = Order.objects.filter(restaurant_id__in=owner_ids)
+    current_staff = _current_staff(request)
+    if current_staff is not None and not current_staff.is_manager:
+        qs = qs.filter(waiter_id=current_staff.id)
     today_qs = qs.filter(created_at__date=today)
     today_orders_count = today_qs.count()
     pending_count = qs.filter(status='pending').count()
