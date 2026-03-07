@@ -39,8 +39,10 @@ from .models import (
     RawMaterial,
     Product,
     ComboSet,
+    Purchase,
+    PurchaseItem,
 )
-from .models import PaymentStatus
+from .models import PaymentStatus, DiscountType
 from .permissions import IsSuperuser, IsSuperuserOrOwner
 from .serializers import (
     OwnerSerializer,
@@ -959,13 +961,82 @@ def category_detail(request, pk):
 
 # --- Raw materials (owner/manager scoped) ---
 
-@api_view(['GET'])
+def _raw_material_to_dict(r):
+    return {
+        'id': r.id,
+        'name': r.name,
+        'restaurant_id': r.restaurant_id,
+        'restaurant_name': r.restaurant.name if r.restaurant_id else '',
+        'unit_id': r.unit_id,
+        'unit_name': r.unit.name if r.unit_id else '',
+        'unit_symbol': r.unit.symbol if r.unit_id else '',
+        'stock': str(r.stock),
+        'min_stock': str(r.min_stock) if r.min_stock is not None else None,
+        'price': str(r.price),
+    }
+
+
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def raw_materials_list(request):
-    """List raw materials for owner/manager restaurants. Optional low_stock=true, restaurant_id=."""
+    """List raw materials for owner/manager restaurants. Optional low_stock=true, restaurant_id=. POST to create."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
+        if request.method == 'POST':
+            return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
         return Response({'results': []})
+    if request.method == 'POST':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        restaurant_id = data.get('restaurant')
+        if not restaurant_id and len(owner_ids) == 1:
+            restaurant_id = owner_ids[0]
+        if not restaurant_id or int(restaurant_id) not in owner_ids:
+            return Response({'detail': 'Valid restaurant is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        unit_id = data.get('unit')
+        if not unit_id:
+            return Response({'detail': 'Unit is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if Unit.objects.filter(pk=unit_id, restaurant_id=restaurant_id).exists() is False:
+            return Response({'detail': 'Unit must belong to the restaurant.'}, status=status.HTTP_400_BAD_REQUEST)
+        name = (data.get('name') or '').strip()
+        if not name:
+            return Response({'detail': 'Name is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        min_stock = data.get('min_stock')
+        stock = data.get('stock', 0)
+        price = data.get('price', 0)
+        try:
+            min_stock = Decimal(str(min_stock)) if min_stock is not None and str(min_stock).strip() != '' else None
+        except Exception:
+            min_stock = None
+        try:
+            stock = Decimal(str(stock)) if stock is not None else Decimal('0')
+        except Exception:
+            stock = Decimal('0')
+        try:
+            price = Decimal(str(price)) if price is not None else Decimal('0')
+        except Exception:
+            price = Decimal('0')
+        vendor_id = data.get('vendor')
+        if vendor_id is not None and str(vendor_id).strip() != '':
+            try:
+                vid = int(vendor_id)
+                if Vendor.objects.filter(pk=vid, restaurant_id=restaurant_id).exists() is False:
+                    vendor_id = None
+            except (TypeError, ValueError):
+                vendor_id = None
+        else:
+            vendor_id = None
+        raw = RawMaterial.objects.create(
+            name=name,
+            restaurant_id=restaurant_id,
+            unit_id=unit_id,
+            min_stock=min_stock,
+            stock=stock,
+            price=price,
+            vendor_id=vendor_id or None,
+        )
+        raw.refresh_from_db()
+        raw = RawMaterial.objects.select_related('restaurant', 'unit').get(pk=raw.id)
+        return Response(_raw_material_to_dict(raw), status=status.HTTP_201_CREATED)
     qs = RawMaterial.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant', 'unit').order_by('name')
     restaurant_id = request.query_params.get('restaurant_id')
     if restaurant_id:
@@ -977,22 +1048,517 @@ def raw_materials_list(request):
             pass
     if request.query_params.get('low_stock') == 'true':
         qs = qs.filter(min_stock__isnull=False).filter(stock__lt=F('min_stock'))
+    results = [_raw_material_to_dict(r) for r in qs]
+    return Response({'results': results})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def raw_materials_stats(request):
+    """Stats for raw materials: total_items, low_stock_count, out_of_stock_count, total_value. Optional restaurant_id=."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'total_items': 0, 'low_stock_count': 0, 'out_of_stock_count': 0, 'total_value': '0'})
+    qs = RawMaterial.objects.filter(restaurant_id__in=owner_ids)
+    restaurant_id = request.query_params.get('restaurant_id')
+    if restaurant_id:
+        try:
+            rid = int(restaurant_id)
+            if rid in owner_ids:
+                qs = qs.filter(restaurant_id=rid)
+        except (TypeError, ValueError):
+            pass
+    total_items = qs.count()
+    low_stock_count = qs.filter(min_stock__isnull=False).filter(stock__lt=F('min_stock')).count()
+    out_of_stock_count = qs.filter(stock__lte=0).count()
+    total_value_qs = qs.annotate(line_value=F('stock') * F('price')).aggregate(s=Sum('line_value'))
+    total_value = total_value_qs['s'] or Decimal('0')
+    return Response({
+        'total_items': total_items,
+        'low_stock_count': low_stock_count,
+        'out_of_stock_count': out_of_stock_count,
+        'total_value': str(total_value),
+    })
+
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def raw_material_detail(request, pk):
+    """Get or update a single raw material. Scope by owner/manager restaurants."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        r = RawMaterial.objects.select_related('restaurant', 'unit').get(pk=pk)
+    except RawMaterial.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if r.restaurant_id not in owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'PATCH':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if 'name' in data and data['name'] is not None:
+            name = (data.get('name') or '').strip()
+            if name:
+                r.name = name
+        if 'unit_id' in data or 'unit' in data:
+            unit_id = data.get('unit_id') or data.get('unit')
+            if unit_id is not None:
+                if Unit.objects.filter(pk=unit_id, restaurant_id=r.restaurant_id).exists():
+                    r.unit_id = unit_id
+        if 'min_stock' in data:
+            try:
+                v = data['min_stock']
+                r.min_stock = Decimal(str(v)) if v is not None and str(v).strip() != '' else None
+            except Exception:
+                pass
+        if 'stock' in data:
+            try:
+                r.stock = Decimal(str(data['stock']))
+            except Exception:
+                pass
+        if 'price' in data:
+            try:
+                r.price = Decimal(str(data['price']))
+            except Exception:
+                pass
+        r.save()
+        r.refresh_from_db()
+        r = RawMaterial.objects.select_related('restaurant', 'unit').get(pk=r.id)
+    return Response(_raw_material_to_dict(r))
+
+
+# --- Tables (owner/manager scoped) ---
+
+def _table_status_and_order(table_id):
+    """Return (status, current_order_id) for table. status: available | occupied. reserved not modeled -> available."""
+    active = Order.objects.filter(
+        table_id=table_id
+    ).exclude(status__in=('served', 'rejected')).order_by('-created_at').first()
+    if active:
+        return ('occupied', active.id)
+    return ('available', None)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def tables_list(request):
+    """List tables for owner/manager restaurants. POST to create. Each row includes status and current_order_id."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        if request.method == 'POST':
+            return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
+        return Response({'results': []})
+    if request.method == 'POST':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        restaurant_id = data.get('restaurant')
+        if not restaurant_id and len(owner_ids) == 1:
+            restaurant_id = owner_ids[0]
+        if not restaurant_id or int(restaurant_id) not in owner_ids:
+            return Response({'detail': 'Valid restaurant is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        name = (data.get('name') or '').strip()
+        if not name:
+            return Response({'detail': 'Name is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            capacity = int(data.get('capacity', 0) or 0)
+        except (TypeError, ValueError):
+            capacity = 0
+        floor = (data.get('floor') or '').strip() or ''
+        near_by = (data.get('near_by') or '').strip() or ''
+        notes = (data.get('notes') or '').strip() or ''
+        tbl = Table.objects.create(
+            restaurant_id=restaurant_id,
+            name=name,
+            capacity=capacity,
+            floor=floor,
+            near_by=near_by,
+            notes=notes,
+        )
+        status_str, order_id = _table_status_and_order(tbl.id)
+        return Response({
+            'id': tbl.id,
+            'name': tbl.name,
+            'capacity': tbl.capacity,
+            'floor': tbl.floor or '',
+            'near_by': tbl.near_by or '',
+            'restaurant_id': tbl.restaurant_id,
+            'status': status_str,
+            'current_order_id': order_id,
+        }, status=status.HTTP_201_CREATED)
+    qs = Table.objects.filter(restaurant_id__in=owner_ids).order_by('floor', 'name')
+    restaurant_id = request.query_params.get('restaurant_id')
+    if restaurant_id:
+        try:
+            rid = int(restaurant_id)
+            if rid in owner_ids:
+                qs = qs.filter(restaurant_id=rid)
+        except (TypeError, ValueError):
+            pass
+    results = []
+    for t in qs:
+        status_str, order_id = _table_status_and_order(t.id)
+        results.append({
+            'id': t.id,
+            'name': t.name,
+            'capacity': t.capacity,
+            'floor': t.floor or '',
+            'near_by': t.near_by or '',
+            'restaurant_id': t.restaurant_id,
+            'status': status_str,
+            'current_order_id': order_id,
+        })
+    return Response({'results': results})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def tables_stats(request):
+    """Total tables, available, occupied, reserved (reserved=0 if not modeled). Optional restaurant_id=."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'total': 0, 'available': 0, 'occupied': 0, 'reserved': 0})
+    qs = Table.objects.filter(restaurant_id__in=owner_ids)
+    restaurant_id = request.query_params.get('restaurant_id')
+    if restaurant_id:
+        try:
+            rid = int(restaurant_id)
+            if rid in owner_ids:
+                qs = qs.filter(restaurant_id=rid)
+        except (TypeError, ValueError):
+            pass
+    total = qs.count()
+    occupied_ids = set(
+        Order.objects.filter(
+            table_id__in=qs.values_list('id', flat=True)
+        ).exclude(status__in=('served', 'rejected')).values_list('table_id', flat=True).distinct()
+    )
+    occupied = len(occupied_ids)
+    available = total - occupied
+    return Response({'total': total, 'available': available, 'occupied': occupied, 'reserved': 0})
+
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def table_detail(request, pk):
+    """Get or update a single table. Scope by owner/manager restaurants. GET includes status and current_order_id."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        t = Table.objects.get(pk=pk)
+    except Table.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if t.restaurant_id not in owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'PATCH':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if 'name' in data and data['name'] is not None:
+            name = (data.get('name') or '').strip()
+            if name:
+                t.name = name
+        if 'capacity' in data:
+            try:
+                t.capacity = int(data.get('capacity', 0) or 0)
+            except (TypeError, ValueError):
+                pass
+        if 'floor' in data:
+            t.floor = (data.get('floor') or '').strip() or ''
+        if 'near_by' in data:
+            t.near_by = (data.get('near_by') or '').strip() or ''
+        if 'notes' in data:
+            t.notes = (data.get('notes') or '').strip() or ''
+        t.save()
+    status_str, order_id = _table_status_and_order(t.id)
+    return Response({
+        'id': t.id,
+        'name': t.name,
+        'capacity': t.capacity,
+        'floor': t.floor or '',
+        'near_by': t.near_by or '',
+        'restaurant_id': t.restaurant_id,
+        'status': status_str,
+        'current_order_id': order_id,
+    })
+
+
+# --- Purchases (owner/manager scoped) ---
+
+def _purchase_to_dict(p, items=None):
+    """Build purchase response dict. If items not provided, fetch from p.items."""
+    if items is None:
+        items = list(p.items.select_related('raw_material').all())
+    item_list = [
+        {
+            'id': i.id,
+            'raw_material_id': i.raw_material_id,
+            'raw_material_name': i.raw_material.name if i.raw_material_id else '',
+            'quantity': str(i.quantity),
+            'price': str(i.price),
+            'total': str(i.total),
+        }
+        for i in items
+    ]
+    return {
+        'id': p.id,
+        'restaurant_id': p.restaurant_id,
+        'vendor_id': p.vendor_id,
+        'vendor_name': p.vendor.name if getattr(p, 'vendor', None) and p.vendor_id else '',
+        'subtotal': str(p.subtotal),
+        'discount_type': p.discount_type or '',
+        'discount': str(p.discount),
+        'total': str(p.total),
+        'created_at': p.created_at.isoformat() if hasattr(p.created_at, 'isoformat') else str(p.created_at),
+        'items_count': len(item_list),
+        'items': item_list,
+    }
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def purchases_list(request):
+    """List purchases for owner/manager restaurants. POST to create with nested items. Optional start_date, end_date, restaurant_id."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        if request.method == 'POST':
+            return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
+        return Response({'results': [], 'stats': {'total_count': 0, 'total_amount': '0', 'total_subtotal': '0'}})
+    if request.method == 'POST':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        restaurant_id = data.get('restaurant')
+        if not restaurant_id and len(owner_ids) == 1:
+            restaurant_id = owner_ids[0]
+        if not restaurant_id or int(restaurant_id) not in owner_ids:
+            return Response({'detail': 'Valid restaurant is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        items_data = data.get('items') or []
+        if not items_data:
+            return Response({'detail': 'At least one item is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        vendor_id = data.get('vendor') or data.get('vendor_id')
+        if vendor_id is not None:
+            try:
+                vid = int(vendor_id)
+                if Vendor.objects.filter(pk=vid, restaurant_id=restaurant_id).exists() is False:
+                    vendor_id = None
+            except (TypeError, ValueError):
+                vendor_id = None
+        else:
+            vendor_id = None
+        discount_type = (data.get('discount_type') or '').strip() or ''
+        try:
+            discount = Decimal(str(data.get('discount') or 0))
+        except Exception:
+            discount = Decimal('0')
+        raw_ids_ok = set(
+            RawMaterial.objects.filter(restaurant_id=restaurant_id).values_list('id', flat=True)
+        )
+        subtotal = Decimal('0')
+        purchase = Purchase.objects.create(
+            restaurant_id=restaurant_id,
+            vendor_id=vendor_id or None,
+            discount_type=discount_type or None,
+            discount=discount,
+            subtotal=Decimal('0'),
+            total=Decimal('0'),
+        )
+        created_items = []
+        for row in items_data:
+            rm_id = row.get('raw_material_id') or row.get('raw_material')
+            if rm_id not in raw_ids_ok:
+                continue
+            try:
+                qty = Decimal(str(row.get('quantity') or 0))
+                price = Decimal(str(row.get('price') or 0))
+            except Exception:
+                continue
+            if qty <= 0:
+                continue
+            item_total = qty * price
+            subtotal += item_total
+            pi = PurchaseItem.objects.create(
+                purchase=purchase,
+                raw_material_id=rm_id,
+                quantity=qty,
+                price=price,
+                total=item_total,
+            )
+            created_items.append(pi)
+        if not created_items:
+            purchase.delete()
+            return Response({'detail': 'At least one valid item is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        purchase.subtotal = subtotal
+        if discount_type == 'flat':
+            purchase.total = max(Decimal('0'), subtotal - discount)
+        elif discount_type == 'percentage':
+            purchase.total = subtotal * (Decimal('100') - discount) / Decimal('100')
+        else:
+            purchase.total = subtotal
+        purchase.save()
+        purchase.refresh_from_db()
+        purchase = Purchase.objects.select_related('vendor').get(pk=purchase.id)
+        return Response(_purchase_to_dict(purchase, created_items), status=status.HTTP_201_CREATED)
+    qs = Purchase.objects.filter(restaurant_id__in=owner_ids).select_related('vendor').annotate(
+        items_count=Count('items'),
+    ).order_by('-created_at')
+    restaurant_id = request.query_params.get('restaurant_id')
+    if restaurant_id:
+        try:
+            rid = int(restaurant_id)
+            if rid in owner_ids:
+                qs = qs.filter(restaurant_id=rid)
+        except (TypeError, ValueError):
+            pass
+    start_date = request.query_params.get('start_date', '').strip()[:10]
+    if start_date:
+        try:
+            qs = qs.filter(created_at__date__gte=start_date)
+        except (TypeError, ValueError):
+            pass
+    end_date = request.query_params.get('end_date', '').strip()[:10]
+    if end_date:
+        try:
+            qs = qs.filter(created_at__date__lte=end_date)
+        except (TypeError, ValueError):
+            pass
     results = [
         {
-            'id': r.id,
-            'name': r.name,
-            'restaurant_id': r.restaurant_id,
-            'restaurant_name': r.restaurant.name if r.restaurant_id else '',
-            'unit_id': r.unit_id,
-            'unit_name': r.unit.name if r.unit_id else '',
-            'unit_symbol': r.unit.symbol if r.unit_id else '',
-            'stock': str(r.stock),
-            'min_stock': str(r.min_stock) if r.min_stock is not None else None,
-            'price': str(r.price),
+            'id': p.id,
+            'restaurant_id': p.restaurant_id,
+            'vendor_id': p.vendor_id,
+            'vendor_name': p.vendor.name if p.vendor_id and getattr(p, 'vendor', None) else '',
+            'subtotal': str(p.subtotal),
+            'discount_type': p.discount_type or '',
+            'discount': str(p.discount),
+            'total': str(p.total),
+            'created_at': p.created_at.isoformat() if hasattr(p.created_at, 'isoformat') else str(p.created_at),
+            'items_count': getattr(p, 'items_count', p.items.count()),
         }
-        for r in qs
+        for p in qs
     ]
-    return Response({'results': results})
+    stats_qs = Purchase.objects.filter(restaurant_id__in=owner_ids)
+    if restaurant_id:
+        try:
+            rid = int(restaurant_id)
+            if rid in owner_ids:
+                stats_qs = stats_qs.filter(restaurant_id=rid)
+        except (TypeError, ValueError):
+            pass
+    if start_date:
+        try:
+            stats_qs = stats_qs.filter(created_at__date__gte=start_date)
+        except (TypeError, ValueError):
+            pass
+    if end_date:
+        try:
+            stats_qs = stats_qs.filter(created_at__date__lte=end_date)
+        except (TypeError, ValueError):
+            pass
+    agg = stats_qs.aggregate(total_amount=Sum('total'), total_subtotal=Sum('subtotal'))
+    return Response({
+        'results': results,
+        'stats': {
+            'total_count': stats_qs.count(),
+            'total_amount': str(agg['total_amount'] or 0),
+            'total_subtotal': str(agg['total_subtotal'] or 0),
+        },
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def purchases_stats(request):
+    """Purchase stats for period. Optional restaurant_id, start_date, end_date."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'total_count': 0, 'total_amount': '0', 'total_subtotal': '0'})
+    qs = Purchase.objects.filter(restaurant_id__in=owner_ids)
+    restaurant_id = request.query_params.get('restaurant_id')
+    if restaurant_id:
+        try:
+            rid = int(restaurant_id)
+            if rid in owner_ids:
+                qs = qs.filter(restaurant_id=rid)
+        except (TypeError, ValueError):
+            pass
+    for param, key in [('start_date', 'created_at__date__gte'), ('end_date', 'created_at__date__lte')]:
+        val = request.query_params.get(param, '').strip()[:10]
+        if val:
+            try:
+                qs = qs.filter(**{key: val})
+            except Exception:
+                pass
+    agg = qs.aggregate(total_amount=Sum('total'), total_subtotal=Sum('subtotal'))
+    return Response({
+        'total_count': qs.count(),
+        'total_amount': str(agg['total_amount'] or 0),
+        'total_subtotal': str(agg['total_subtotal'] or 0),
+    })
+
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def purchase_detail(request, pk):
+    """Get or update a single purchase. Scope by owner/manager restaurants. PATCH can update header and replace items."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        p = Purchase.objects.select_related('vendor', 'restaurant').get(pk=pk)
+    except Purchase.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if p.restaurant_id not in owner_ids:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'PATCH':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if 'vendor' in data or 'vendor_id' in data:
+            vid = data.get('vendor') or data.get('vendor_id')
+            if vid is not None and str(vid).strip() != '':
+                try:
+                    if Vendor.objects.filter(pk=int(vid), restaurant_id=p.restaurant_id).exists():
+                        p.vendor_id = int(vid)
+                except (TypeError, ValueError):
+                    pass
+            else:
+                p.vendor_id = None
+        if 'discount_type' in data:
+            p.discount_type = (data.get('discount_type') or '').strip() or ''
+        if 'discount' in data:
+            try:
+                p.discount = Decimal(str(data['discount']))
+            except Exception:
+                pass
+        if 'items' in data:
+            items_data = data.get('items') or []
+            p.items.all().delete()
+            raw_ids_ok = set(
+                RawMaterial.objects.filter(restaurant_id=p.restaurant_id).values_list('id', flat=True)
+            )
+            subtotal = Decimal('0')
+            for row in items_data:
+                rm_id = row.get('raw_material_id') or row.get('raw_material')
+                if rm_id not in raw_ids_ok:
+                    continue
+                try:
+                    qty = Decimal(str(row.get('quantity') or 0))
+                    price = Decimal(str(row.get('price') or 0))
+                except Exception:
+                    continue
+                if qty <= 0:
+                    continue
+                item_total = qty * price
+                subtotal += item_total
+                PurchaseItem.objects.create(
+                    purchase=p,
+                    raw_material_id=rm_id,
+                    quantity=qty,
+                    price=price,
+                    total=item_total,
+                )
+            p.subtotal = subtotal
+            # Purchase.save() will set p.total from compute_total()
+        else:
+            p.save()
+        p.save()
+        p.refresh_from_db()
+        p = Purchase.objects.select_related('vendor').get(pk=p.id)
+    return Response(_purchase_to_dict(p))
 
 
 # --- Orders list (owner/manager scoped) ---

@@ -37,7 +37,17 @@ urlpatterns = [
     path('categories/', views.categories_list),
     path('categories/<int:pk>/', views.category_detail),
     # Raw materials (owner/manager)
+    path('raw-materials/stats/', views.raw_materials_stats),
+    path('raw-materials/<int:pk>/', views.raw_material_detail),
     path('raw-materials/', views.raw_materials_list),
+    # Tables (owner/manager)
+    path('tables/stats/', views.tables_stats),
+    path('tables/<int:pk>/', views.table_detail),
+    path('tables/', views.tables_list),
+    # Purchases (owner/manager)
+    path('purchases/stats/', views.purchases_stats),
+    path('purchases/<int:pk>/', views.purchase_detail),
+    path('purchases/', views.purchases_list),
     # Orders (owner/manager)
     path('orders/', views.orders_list),
     # Products (owner/manager)

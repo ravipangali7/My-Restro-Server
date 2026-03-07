@@ -646,6 +646,10 @@ class Purchase(models.Model):
     restaurant = models.ForeignKey(
         Restaurant, on_delete=models.CASCADE, related_name='purchases'
     )
+    vendor = models.ForeignKey(
+        Vendor, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='purchases'
+    )
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0'))
     discount_type = models.CharField(
         max_length=20, choices=DiscountType.choices, blank=True
