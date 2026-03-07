@@ -1222,6 +1222,9 @@ def categories_list(request):
     qs = Category.objects.filter(restaurant_id__in=owner_ids).annotate(
         item_count=Count('products', distinct=True),
     ).select_related('restaurant').order_by('name')
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(name__icontains=search)
     serializer = CategoryListSerializer(qs, many=True, context={'request': request})
     return Response({'results': serializer.data})
 
@@ -1363,6 +1366,9 @@ def raw_materials_list(request):
             pass
     if request.query_params.get('low_stock') == 'true':
         qs = qs.filter(min_stock__isnull=False).filter(stock__lt=F('min_stock'))
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(name__icontains=search)
     results = [_raw_material_to_dict(r, request) for r in qs]
     return Response({'results': results})
 
@@ -2345,16 +2351,26 @@ def products_list(request):
         if request.FILES:
             for key in request.FILES:
                 data[key] = request.FILES[key]
-        if isinstance(data.get('variants'), str):
+        variants_raw = data.get('variants')
+        if request.POST.get('variants') is not None and (variants_raw is None or variants_raw == ''):
+            variants_raw = request.POST.get('variants')
+        if isinstance(variants_raw, str):
             try:
-                data['variants'] = json.loads(data['variants'])
+                data['variants'] = json.loads(variants_raw)
             except Exception:
                 data['variants'] = []
-        if isinstance(data.get('raw_material_links'), str):
+        elif not isinstance(data.get('variants'), list):
+            data['variants'] = []
+        raw_links_raw = data.get('raw_material_links')
+        if request.POST.get('raw_material_links') is not None and (raw_links_raw is None or raw_links_raw == ''):
+            raw_links_raw = request.POST.get('raw_material_links')
+        if isinstance(raw_links_raw, str):
             try:
-                data['raw_material_links'] = json.loads(data['raw_material_links'])
+                data['raw_material_links'] = json.loads(raw_links_raw)
             except Exception:
                 data['raw_material_links'] = []
+        elif not isinstance(data.get('raw_material_links'), list):
+            data['raw_material_links'] = []
         if not data.get('restaurant') and len(owner_ids) == 1:
             data['restaurant'] = owner_ids[0]
         serializer = ProductCreateUpdateSerializer(
@@ -2373,6 +2389,11 @@ def products_list(request):
     ).prefetch_related('variants', 'variants__unit', 'raw_material_links').annotate(
         raw_material_links_count=Count('raw_material_links', distinct=True),
     ).order_by('name')
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(
+            Q(name__icontains=search) | Q(category__name__icontains=search)
+        )
     serializer = ProductListSerializer(qs, many=True, context={'request': request})
     return Response({'results': serializer.data})
 
