@@ -1,3 +1,4 @@
+import json
 from django.db.models import Q, Sum, Count, F, Avg
 from django.db.models.functions import Coalesce
 from django.db.models import Value
@@ -39,13 +40,14 @@ from .models import (
     Table,
     RawMaterial,
     Product,
+    ProductVariant,
     ComboSet,
     Purchase,
     PurchaseItem,
     Feedback,
     Expenses,
 )
-from .models import PaymentStatus, DiscountType
+from .models import PaymentStatus, DiscountType, OrderType
 from .permissions import IsSuperuser, IsSuperuserOrOwner
 from .serializers import (
     OwnerSerializer,
@@ -1160,6 +1162,9 @@ def categories_list(request):
         return Response({'results': []})
     if request.method == 'POST':
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if request.FILES:
+            for key in request.FILES:
+                data[key] = request.FILES[key]
         if not data.get('restaurant') and len(owner_ids) == 1:
             data['restaurant'] = owner_ids[0]
         serializer = CategoryCreateUpdateSerializer(
@@ -1181,10 +1186,10 @@ def categories_list(request):
     return Response({'results': serializer.data})
 
 
-@api_view(['GET', 'PATCH', 'PUT'])
+@api_view(['GET', 'PATCH', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def category_detail(request, pk):
-    """Get or update a single category."""
+    """Get, update, or delete a single category."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -1194,6 +1199,9 @@ def category_detail(request, pk):
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if category.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'DELETE':
+        category.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
     if request.method == 'GET':
         from .models import Product
         category_with_count = Category.objects.filter(pk=pk, restaurant_id__in=owner_ids).annotate(
@@ -1204,8 +1212,12 @@ def category_detail(request, pk):
         serializer = CategoryListSerializer(category_with_count, context={'request': request})
         return Response(serializer.data)
     if request.method in ('PATCH', 'PUT'):
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if request.FILES:
+            for key in request.FILES:
+                data[key] = request.FILES[key]
         serializer = CategoryCreateUpdateSerializer(
-            category, data=request.data, partial=True,
+            category, data=data, partial=True,
             context={'request': request, 'owner_ids': owner_ids},
         )
         if serializer.is_valid():
@@ -1217,7 +1229,11 @@ def category_detail(request, pk):
 
 # --- Raw materials (owner/manager scoped) ---
 
-def _raw_material_to_dict(r):
+def _raw_material_to_dict(r, request=None):
+    from .serializers import _build_media_url
+    image_url = None
+    if getattr(r, 'image', None) and r.image and request:
+        image_url = _build_media_url(request, r.image.url if hasattr(r.image, 'url') else str(r.image))
     return {
         'id': r.id,
         'name': r.name,
@@ -1229,6 +1245,7 @@ def _raw_material_to_dict(r):
         'stock': str(r.stock),
         'min_stock': str(r.min_stock) if r.min_stock is not None else None,
         'price': str(r.price),
+        'image_url': image_url,
     }
 
 
@@ -1281,6 +1298,7 @@ def raw_materials_list(request):
                 vendor_id = None
         else:
             vendor_id = None
+        image_file = request.FILES.get('image') if request.FILES else None
         raw = RawMaterial.objects.create(
             name=name,
             restaurant_id=restaurant_id,
@@ -1289,10 +1307,11 @@ def raw_materials_list(request):
             stock=stock,
             price=price,
             vendor_id=vendor_id or None,
+            image=image_file,
         )
         raw.refresh_from_db()
         raw = RawMaterial.objects.select_related('restaurant', 'unit').get(pk=raw.id)
-        return Response(_raw_material_to_dict(raw), status=status.HTTP_201_CREATED)
+        return Response(_raw_material_to_dict(raw, request), status=status.HTTP_201_CREATED)
     qs = RawMaterial.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant', 'unit').order_by('name')
     restaurant_id = request.query_params.get('restaurant_id')
     if restaurant_id:
@@ -1304,7 +1323,7 @@ def raw_materials_list(request):
             pass
     if request.query_params.get('low_stock') == 'true':
         qs = qs.filter(min_stock__isnull=False).filter(stock__lt=F('min_stock'))
-    results = [_raw_material_to_dict(r) for r in qs]
+    results = [_raw_material_to_dict(r, request) for r in qs]
     return Response({'results': results})
 
 
@@ -1337,10 +1356,10 @@ def raw_materials_stats(request):
     })
 
 
-@api_view(['GET', 'PATCH'])
+@api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def raw_material_detail(request, pk):
-    """Get or update a single raw material. Scope by owner/manager restaurants."""
+    """Get, update, or delete a single raw material. Scope by owner/manager restaurants."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -1350,8 +1369,13 @@ def raw_material_detail(request, pk):
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if r.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'DELETE':
+        r.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
     if request.method == 'PATCH':
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if request.FILES and 'image' in request.FILES:
+            r.image = request.FILES['image']
         if 'name' in data and data['name'] is not None:
             name = (data.get('name') or '').strip()
             if name:
@@ -1380,7 +1404,7 @@ def raw_material_detail(request, pk):
         r.save()
         r.refresh_from_db()
         r = RawMaterial.objects.select_related('restaurant', 'unit').get(pk=r.id)
-    return Response(_raw_material_to_dict(r))
+    return Response(_raw_material_to_dict(r, request))
 
 
 # --- Tables (owner/manager scoped) ---
@@ -1421,6 +1445,7 @@ def tables_list(request):
         floor = (data.get('floor') or '').strip() or ''
         near_by = (data.get('near_by') or '').strip() or ''
         notes = (data.get('notes') or '').strip() or ''
+        image_file = request.FILES.get('image') if request.FILES else None
         tbl = Table.objects.create(
             restaurant_id=restaurant_id,
             name=name,
@@ -1428,8 +1453,13 @@ def tables_list(request):
             floor=floor,
             near_by=near_by,
             notes=notes,
+            image=image_file,
         )
         status_str, order_id = _table_status_and_order(tbl.id)
+        from .serializers import _build_media_url
+        image_url = None
+        if tbl.image:
+            image_url = _build_media_url(request, tbl.image.url if hasattr(tbl.image, 'url') else str(tbl.image))
         return Response({
             'id': tbl.id,
             'name': tbl.name,
@@ -1439,6 +1469,7 @@ def tables_list(request):
             'restaurant_id': tbl.restaurant_id,
             'status': status_str,
             'current_order_id': order_id,
+            'image_url': image_url,
         }, status=status.HTTP_201_CREATED)
     qs = Table.objects.filter(restaurant_id__in=owner_ids).order_by('floor', 'name')
     restaurant_id = request.query_params.get('restaurant_id')
@@ -1449,9 +1480,13 @@ def tables_list(request):
                 qs = qs.filter(restaurant_id=rid)
         except (TypeError, ValueError):
             pass
+    from .serializers import _build_media_url
     results = []
     for t in qs:
         status_str, order_id = _table_status_and_order(t.id)
+        image_url = None
+        if t.image:
+            image_url = _build_media_url(request, t.image.url if hasattr(t.image, 'url') else str(t.image))
         results.append({
             'id': t.id,
             'name': t.name,
@@ -1461,6 +1496,7 @@ def tables_list(request):
             'restaurant_id': t.restaurant_id,
             'status': status_str,
             'current_order_id': order_id,
+            'image_url': image_url,
         })
     return Response({'results': results})
 
@@ -1492,10 +1528,10 @@ def tables_stats(request):
     return Response({'total': total, 'available': available, 'occupied': occupied, 'reserved': 0})
 
 
-@api_view(['GET', 'PATCH'])
+@api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def table_detail(request, pk):
-    """Get or update a single table. Scope by owner/manager restaurants. GET includes status and current_order_id."""
+    """Get, update, or delete a single table. Scope by owner/manager restaurants. GET includes status and current_order_id."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -1505,8 +1541,13 @@ def table_detail(request, pk):
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if t.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'DELETE':
+        t.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
     if request.method == 'PATCH':
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if request.FILES and 'image' in request.FILES:
+            t.image = request.FILES['image']
         if 'name' in data and data['name'] is not None:
             name = (data.get('name') or '').strip()
             if name:
@@ -1524,6 +1565,10 @@ def table_detail(request, pk):
             t.notes = (data.get('notes') or '').strip() or ''
         t.save()
     status_str, order_id = _table_status_and_order(t.id)
+    from .serializers import _build_media_url
+    image_url = None
+    if t.image:
+        image_url = _build_media_url(request, t.image.url if hasattr(t.image, 'url') else str(t.image))
     return Response({
         'id': t.id,
         'name': t.name,
@@ -1533,6 +1578,7 @@ def table_detail(request, pk):
         'restaurant_id': t.restaurant_id,
         'status': status_str,
         'current_order_id': order_id,
+        'image_url': image_url,
     })
 
 
@@ -1819,13 +1865,179 @@ def purchase_detail(request, pk):
 
 # --- Orders list (owner/manager scoped) ---
 
-@api_view(['GET'])
+def _order_create_response(order, request):
+    """Build order detail dict for order_detail and order create response."""
+    items = []
+    subtotal = Decimal('0')
+    for item in order.items.all():
+        line_total = item.total
+        subtotal += line_total
+        items.append({
+            'id': item.id,
+            'name': _order_item_name(item),
+            'quantity': str(item.quantity),
+            'price': str(item.price),
+            'total': str(line_total),
+        })
+    return {
+        'id': order.id,
+        'restaurant_id': order.restaurant_id,
+        'table_id': order.table_id,
+        'table_number': order.table_number or (order.table.name if order.table_id else ''),
+        'order_type': order.order_type,
+        'status': order.status,
+        'payment_status': order.payment_status,
+        'payment_method': order.payment_method or '',
+        'waiter_id': order.waiter_id,
+        'waiter_name': order.waiter.user.name if order.waiter and order.waiter.user_id else '',
+        'subtotal': str(subtotal),
+        'service_charge': str(order.service_charge) if order.service_charge is not None else None,
+        'discount': str(order.discount) if order.discount is not None else None,
+        'total': str(order.total),
+        'created_at': order.created_at.isoformat() if hasattr(order.created_at, 'isoformat') else str(order.created_at),
+        'updated_at': order.updated_at.isoformat() if hasattr(order.updated_at, 'isoformat') else str(order.updated_at),
+        'items': items,
+    }
+
+
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def orders_list(request):
-    """List orders for owner/manager restaurants. Filters: status, payment_status, start_date, end_date. Paginated."""
+    """List orders for owner/manager restaurants. POST to create. Filters: status, payment_status, start_date, end_date. Paginated."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
+        if request.method == 'POST':
+            return Response({'detail': 'You have no restaurants.'}, status=status.HTTP_403_FORBIDDEN)
         return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    if request.method == 'POST':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        restaurant_id = data.get('restaurant')
+        if not restaurant_id and len(owner_ids) == 1:
+            restaurant_id = owner_ids[0]
+        try:
+            restaurant_id = int(restaurant_id)
+        except (TypeError, ValueError):
+            return Response({'detail': 'Valid restaurant is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if restaurant_id not in owner_ids:
+            return Response({'detail': 'Restaurant not in your scope.'}, status=status.HTTP_403_FORBIDDEN)
+        order_type = (data.get('order_type') or 'table').strip().lower()
+        if order_type not in (OrderType.TABLE, OrderType.PACKING, OrderType.DELIVERY):
+            order_type = OrderType.TABLE
+        items_data = data.get('items') or []
+        if not items_data:
+            return Response({'detail': 'At least one item is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        table_id = data.get('table_id')
+        if table_id is not None:
+            try:
+                table_id = int(table_id)
+                if Table.objects.filter(pk=table_id, restaurant_id=restaurant_id).exists() is False:
+                    table_id = None
+            except (TypeError, ValueError):
+                table_id = None
+        else:
+            table_id = None
+        table_number = (data.get('table_number') or '').strip() or None
+        address = (data.get('address') or '').strip() or None
+        try:
+            service_charge = Decimal(str(data.get('service_charge') or 0))
+        except Exception:
+            service_charge = Decimal('0')
+        payment_method = (data.get('payment_method') or '').strip() or None
+        if payment_method and payment_method not in ('cash', 'e_wallet', 'bank'):
+            payment_method = None
+        waiter_id = data.get('waiter_id')
+        if waiter_id is not None:
+            try:
+                waiter_id = int(waiter_id)
+                if Staff.objects.filter(pk=waiter_id, restaurant_id=restaurant_id).exists() is False:
+                    waiter_id = None
+            except (TypeError, ValueError):
+                waiter_id = None
+        else:
+            waiter_id = None
+        order_total = Decimal('0')
+        line_items = []
+        for row in items_data:
+            qty = Decimal(str(row.get('quantity') or 1))
+            if qty <= 0:
+                continue
+            pv_id = row.get('product_variant_id')
+            prod_id = row.get('product_id')
+            combo_id = row.get('combo_set_id')
+            unit_price = None
+            product_variant_id = None
+            product_id = None
+            combo_set_id = None
+            if pv_id:
+                try:
+                    pv = ProductVariant.objects.select_related('product').get(
+                        pk=pv_id, product__restaurant_id=restaurant_id
+                    )
+                    unit_price = pv.get_final_price()
+                    product_variant_id = pv.id
+                    product_id = pv.product_id
+                except (ProductVariant.DoesNotExist, TypeError, ValueError):
+                    pass
+            if unit_price is None and prod_id:
+                try:
+                    prod = Product.objects.filter(pk=prod_id, restaurant_id=restaurant_id).first()
+                    if prod:
+                        first_v = prod.variants.first()
+                        if first_v:
+                            unit_price = first_v.get_final_price()
+                            product_variant_id = first_v.id
+                            product_id = prod.id
+                except Exception:
+                    pass
+            if unit_price is None and combo_id:
+                try:
+                    combo = ComboSet.objects.get(pk=combo_id, restaurant_id=restaurant_id)
+                    unit_price = combo.price
+                    combo_set_id = combo.id
+                except (ComboSet.DoesNotExist, TypeError, ValueError):
+                    pass
+            if unit_price is not None and (product_variant_id or product_id or combo_set_id):
+                line_total = unit_price * qty
+                order_total += line_total
+                line_items.append({
+                    'product_id': product_id,
+                    'product_variant_id': product_variant_id,
+                    'combo_set_id': combo_set_id,
+                    'price': unit_price,
+                    'quantity': qty,
+                    'total': line_total,
+                })
+        if not line_items:
+            return Response({'detail': 'No valid items.'}, status=status.HTTP_400_BAD_REQUEST)
+        order_total += service_charge
+        order = Order.objects.create(
+            restaurant_id=restaurant_id,
+            table_id=table_id,
+            table_number=table_number,
+            order_type=order_type,
+            address=address,
+            status='pending',
+            payment_status='pending',
+            payment_method=payment_method or '',
+            waiter_id=waiter_id,
+            total=order_total,
+            service_charge=service_charge if service_charge else None,
+        )
+        for line in line_items:
+            OrderItem.objects.create(
+                order=order,
+                product_id=line.get('product_id'),
+                product_variant_id=line.get('product_variant_id'),
+                combo_set_id=line.get('combo_set_id'),
+                price=line['price'],
+                quantity=line['quantity'],
+                total=line['total'],
+            )
+        order.refresh_from_db()
+        order = Order.objects.select_related('table', 'waiter', 'waiter__user').prefetch_related(
+            'items__product', 'items__product_variant', 'items__product_variant__product', 'items__combo_set'
+        ).get(pk=order.id)
+        return Response(_order_create_response(order, request), status=status.HTTP_201_CREATED)
     qs = Order.objects.filter(restaurant_id__in=owner_ids).annotate(
         items_count=Count('items'),
     ).select_related('table', 'waiter', 'waiter__user').order_by('-created_at')
@@ -2090,6 +2302,19 @@ def products_list(request):
         return Response({'results': []})
     if request.method == 'POST':
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if request.FILES:
+            for key in request.FILES:
+                data[key] = request.FILES[key]
+        if isinstance(data.get('variants'), str):
+            try:
+                data['variants'] = json.loads(data['variants'])
+            except Exception:
+                data['variants'] = []
+        if isinstance(data.get('raw_material_links'), str):
+            try:
+                data['raw_material_links'] = json.loads(data['raw_material_links'])
+            except Exception:
+                data['raw_material_links'] = []
         if not data.get('restaurant') and len(owner_ids) == 1:
             data['restaurant'] = owner_ids[0]
         serializer = ProductCreateUpdateSerializer(
@@ -2112,10 +2337,10 @@ def products_list(request):
     return Response({'results': serializer.data})
 
 
-@api_view(['GET', 'PATCH', 'PUT'])
+@api_view(['GET', 'PATCH', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def product_detail(request, pk):
-    """Get or update a single product."""
+    """Get, update, or delete a single product."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -2127,12 +2352,29 @@ def product_detail(request, pk):
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if product.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'DELETE':
+        product.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
     if request.method == 'GET':
         serializer = ProductDetailSerializer(product, context={'request': request})
         return Response(serializer.data)
     if request.method in ('PATCH', 'PUT'):
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if request.FILES:
+            for key in request.FILES:
+                data[key] = request.FILES[key]
+        if isinstance(data.get('variants'), str):
+            try:
+                data['variants'] = json.loads(data['variants'])
+            except Exception:
+                data['variants'] = []
+        if isinstance(data.get('raw_material_links'), str):
+            try:
+                data['raw_material_links'] = json.loads(data['raw_material_links'])
+            except Exception:
+                data['raw_material_links'] = []
         serializer = ProductCreateUpdateSerializer(
-            product, data=request.data, partial=True,
+            product, data=data, partial=True,
             context={'request': request, 'owner_ids': owner_ids, 'product': product},
         )
         if serializer.is_valid():
@@ -2155,6 +2397,14 @@ def combos_list(request):
         return Response({'results': []})
     if request.method == 'POST':
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if request.FILES:
+            for key in request.FILES:
+                data[key] = request.FILES[key]
+        if isinstance(data.get('products'), str):
+            try:
+                data['products'] = json.loads(data['products'])
+            except Exception:
+                data['products'] = []
         if not data.get('restaurant') and len(owner_ids) == 1:
             data['restaurant'] = owner_ids[0]
         serializer = ComboSetCreateUpdateSerializer(
@@ -2175,10 +2425,10 @@ def combos_list(request):
     return Response({'results': serializer.data})
 
 
-@api_view(['GET', 'PATCH', 'PUT'])
+@api_view(['GET', 'PATCH', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def combo_detail(request, pk):
-    """Get or update a single combo."""
+    """Get, update, or delete a single combo."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -2188,12 +2438,24 @@ def combo_detail(request, pk):
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if combo.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'DELETE':
+        combo.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
     if request.method == 'GET':
         serializer = ComboSetDetailSerializer(combo, context={'request': request})
         return Response(serializer.data)
     if request.method in ('PATCH', 'PUT'):
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if request.FILES:
+            for key in request.FILES:
+                data[key] = request.FILES[key]
+        if isinstance(data.get('products'), str):
+            try:
+                data['products'] = json.loads(data['products'])
+            except Exception:
+                data['products'] = []
         serializer = ComboSetCreateUpdateSerializer(
-            combo, data=request.data, partial=True,
+            combo, data=data, partial=True,
             context={'request': request, 'owner_ids': owner_ids},
         )
         if serializer.is_valid():

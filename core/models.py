@@ -31,6 +31,7 @@ class KycStatus(models.TextChoices):
 class OrderType(models.TextChoices):
     TABLE = 'table', 'Table'
     PACKING = 'packing', 'Packing'
+    DELIVERY = 'delivery', 'Delivery'
 
 
 class OrderStatus(models.TextChoices):
@@ -470,6 +471,7 @@ class Table(models.Model):
     floor = models.CharField(max_length=50, blank=True)
     near_by = models.CharField(max_length=255, blank=True)
     notes = models.TextField(blank=True)
+    image = models.ImageField(upload_to='tables/', blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
