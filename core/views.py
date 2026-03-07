@@ -3353,6 +3353,9 @@ def _transaction_queryset(request):
             Q(restaurant__name__icontains=search) |
             Q(restaurant__slug__icontains=search)
         )
+    category = (request.query_params.get('category') or '').strip().lower()
+    if category and category in [c[0] for c in TransactionCategory.choices]:
+        qs = qs.filter(category=category)
     return qs
 
 
