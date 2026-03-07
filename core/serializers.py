@@ -891,7 +891,7 @@ class ProductRawMaterialNestedSerializer(serializers.ModelSerializer):
 
 
 class ProductListSerializer(serializers.ModelSerializer):
-    category_id = serializers.IntegerField(source='category_id', read_only=True)
+    category_id = serializers.IntegerField(read_only=True)
     category_name = serializers.CharField(source='category.name', read_only=True)
     variants = ProductVariantNestedSerializer(many=True, read_only=True)
     raw_material_links_count = serializers.SerializerMethodField()
@@ -917,7 +917,7 @@ class ProductListSerializer(serializers.ModelSerializer):
 
 
 class ProductDetailSerializer(serializers.ModelSerializer):
-    category_id = serializers.IntegerField(source='category_id', read_only=True)
+    category_id = serializers.IntegerField(read_only=True)
     category_name = serializers.CharField(source='category.name', read_only=True)
     variants = ProductVariantNestedSerializer(many=True, read_only=True)
     raw_material_links = ProductRawMaterialNestedSerializer(many=True, read_only=True)
