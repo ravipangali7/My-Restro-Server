@@ -119,6 +119,13 @@ def _manager_restaurant_id(request):
     return staff.restaurant_id if staff else None
 
 
+def _current_staff(request):
+    """Return Staff instance for request.user when they are restaurant staff; else None."""
+    if not getattr(request.user, 'is_restaurant_staff', False):
+        return None
+    return Staff.objects.filter(user=request.user).select_related('user', 'restaurant').first()
+
+
 def _owner_or_manager_restaurant_ids(request):
     """Return list of restaurant IDs for owner (all their restaurants) or manager (single restaurant); else None."""
     owner_ids = _owner_restaurant_ids(request)
@@ -472,7 +479,7 @@ def due_stats(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_dashboard_stats(request):
-    """Owner-scoped dashboard: restaurants count, staff count, revenue, due, recent activity. Optional range/start_date/end_date for period stats."""
+    """Owner-scoped dashboard: restaurants count, staff count, revenue, due, recent activity. Waiter gets own stats."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None:
         return Response({'detail': 'Not available for superuser. Use dashboard-stats.'}, status=status.HTTP_403_FORBIDDEN)
@@ -485,6 +492,59 @@ def owner_dashboard_stats(request):
             'active_restaurants': 0,
             'recent_transactions': [],
         })
+    current_staff = _current_staff(request)
+    if current_staff is not None and current_staff.is_waiter:
+        # Waiter dashboard: my orders today, pending, recent orders, my attendance today, restaurant info
+        today = timezone.now().date()
+        my_orders_today = Order.objects.filter(
+            restaurant_id__in=owner_ids,
+            waiter_id=current_staff.id,
+            created_at__date=today,
+        ).count()
+        pending_orders = Order.objects.filter(
+            restaurant_id__in=owner_ids,
+            waiter_id=current_staff.id,
+        ).exclude(payment_status__in=['paid', 'success'])
+        pending_count = pending_orders.count()
+        recent_orders_qs = Order.objects.filter(
+            restaurant_id__in=owner_ids,
+            waiter_id=current_staff.id,
+            created_at__date=today,
+        ).annotate(items_count=Count('items')).select_related('table').order_by('-created_at')[:15]
+        recent_orders = [
+            {
+                'id': o.id,
+                'table_number': o.table_number or (o.table.name if o.table_id else ''),
+                'total': str(o.total),
+                'status': o.status,
+                'payment_status': o.payment_status,
+                'items_count': getattr(o, 'items_count', 0),
+                'created_at': o.created_at.isoformat() if hasattr(o.created_at, 'isoformat') else str(o.created_at),
+            }
+            for o in recent_orders_qs
+        ]
+        my_attendance_today = Attendance.objects.filter(
+            staff_id=current_staff.id,
+            date=today,
+        ).first()
+        attendance_status = my_attendance_today.status if my_attendance_today else 'unmarked'
+        single_rest = Restaurant.objects.filter(id=owner_ids[0]).first() if owner_ids else None
+        payload = {
+            'my_orders_today': my_orders_today,
+            'pending_orders_count': pending_count,
+            'recent_orders': recent_orders,
+            'attendance_today_status': attendance_status,
+            'restaurant_id': owner_ids[0] if len(owner_ids) == 1 else None,
+        }
+        if single_rest:
+            from .serializers import _build_media_url
+            logo_url = None
+            if single_rest.logo:
+                logo_url = _build_media_url(request, single_rest.logo.url if hasattr(single_rest.logo, 'url') else str(single_rest.logo))
+            payload['restaurant_slug'] = single_rest.slug
+            payload['restaurant_name'] = single_rest.name
+            payload['restaurant_logo_url'] = logo_url
+        return Response(payload)
     start_dt, end_dt = _parse_date_range(request)
     qs_rest = Restaurant.objects.filter(id__in=owner_ids)
     restaurants_count = qs_rest.count()
@@ -872,7 +932,17 @@ def owner_attendance_list(request):
     restaurant_id = int(restaurant_id_param) if restaurant_id_param else (owner_ids[0] if len(owner_ids) == 1 else None)
     if restaurant_id is None or restaurant_id not in owner_ids:
         return Response({'detail': 'Valid restaurant_id required.'}, status=status.HTTP_400_BAD_REQUEST)
-    return Response(_owner_attendance_list_for_date(owner_ids, restaurant_id, att_date))
+    out = _owner_attendance_list_for_date(owner_ids, restaurant_id, att_date)
+    current_staff = _current_staff(request)
+    if current_staff is not None and not current_staff.is_manager:
+        out['results'] = [r for r in out['results'] if r['staff_id'] == current_staff.id]
+        out['stats'] = {
+            'present': sum(1 for r in out['results'] if r['status'] == 'present'),
+            'absent': sum(1 for r in out['results'] if r['status'] == 'absent'),
+            'leave': sum(1 for r in out['results'] if r['status'] == 'leave'),
+            'total_staff': len(out['results']),
+        }
+    return Response(out)
 
 
 @api_view(['GET'])
@@ -917,6 +987,9 @@ def owner_attendance_detail(request, pk):
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if att.restaurant_id not in owner_ids:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    current_staff = _current_staff(request)
+    if current_staff is not None and not current_staff.is_manager and att.staff_id != current_staff.id:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'GET':
         return Response({
             'id': att.id,
@@ -941,6 +1014,48 @@ def owner_attendance_detail(request, pk):
             })
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_attendance_my_list(request):
+    """List current staff's own attendance in date range (for waiter/kitchen). from_date, to_date required (YYYY-MM-DD)."""
+    current_staff = _current_staff(request)
+    if current_staff is None or current_staff.is_manager:
+        return Response({'detail': 'Not available.'}, status=status.HTTP_403_FORBIDDEN)
+    from_param = (request.query_params.get('from_date') or request.query_params.get('from') or '').strip()
+    to_param = (request.query_params.get('to_date') or request.query_params.get('to') or '').strip()
+    if not from_param or not to_param:
+        return Response({'detail': 'from_date and to_date (YYYY-MM-DD) required.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        from_date = datetime.strptime(from_param[:10], '%Y-%m-%d').date()
+        to_date = datetime.strptime(to_param[:10], '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        return Response({'detail': 'Invalid date format.'}, status=status.HTTP_400_BAD_REQUEST)
+    if from_date > to_date:
+        from_date, to_date = to_date, from_date
+    qs = Attendance.objects.filter(
+        staff_id=current_staff.id,
+        date__gte=from_date,
+        date__lte=to_date,
+    ).order_by('-date')
+    results = [
+        {
+            'id': a.id,
+            'date': a.date.isoformat(),
+            'status': a.status.lower(),
+            'leave_reason': a.leave_reason or '',
+            'created_at': a.created_at.isoformat() if a.created_at else None,
+        }
+        for a in qs
+    ]
+    present = sum(1 for r in results if r['status'] == 'present')
+    absent = sum(1 for r in results if r['status'] == 'absent')
+    leave = sum(1 for r in results if r['status'] == 'leave')
+    return Response({
+        'results': results,
+        'stats': {'present': present, 'absent': absent, 'leave': leave, 'total_days': len(results)},
+    })
 
 
 # --- Feedback (owner/manager) ---
@@ -2537,11 +2652,14 @@ def combo_detail(request, pk):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_paid_records_list(request):
-    """List paid records for owner/manager restaurants; search, date range, pagination."""
+    """List paid records for owner/manager restaurants; search, date range, pagination. Waiter sees only own records."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
     qs = PaidRecord.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant').order_by('-created_at')
+    current_staff = _current_staff(request)
+    if current_staff is not None and not current_staff.is_manager:
+        qs = qs.filter(staff_id=current_staff.id)
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(Q(name__icontains=search))
@@ -2576,11 +2694,14 @@ def owner_paid_records_list(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_paid_records_stats(request):
-    """Total paid amount and count for owner/manager restaurants (optional date range)."""
+    """Total paid amount and count for owner/manager restaurants (optional date range). Waiter sees only own."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'total_amount': '0', 'count': 0})
     qs = PaidRecord.objects.filter(restaurant_id__in=owner_ids)
+    current_staff = _current_staff(request)
+    if current_staff is not None and not current_staff.is_manager:
+        qs = qs.filter(staff_id=current_staff.id)
     date_from = request.query_params.get('date_from') or request.query_params.get('start_date')
     date_to = request.query_params.get('date_to') or request.query_params.get('end_date')
     if date_from:
@@ -2672,7 +2793,7 @@ def owner_received_records_stats(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_payroll_list(request):
-    """Payroll list for owner's staff: staff, restaurant, period, days, per_day, total salary, paid/due, status."""
+    """Payroll list for owner's staff: staff, restaurant, period, days, per_day, total salary, paid/due, status. Waiter sees only own row."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
@@ -2683,6 +2804,9 @@ def owner_payroll_list(request):
         start_dt = timezone.make_aware(datetime(today.year, today.month, 1))
         end_dt = timezone.now()
     staff_qs = Staff.objects.filter(restaurant_id__in=owner_ids).select_related('user', 'restaurant').order_by('restaurant__name', 'user__name')
+    current_staff = _current_staff(request)
+    if current_staff is not None and not current_staff.is_manager:
+        staff_qs = staff_qs.filter(id=current_staff.id)
     results = []
     for s in staff_qs:
         days = Attendance.objects.filter(
@@ -2709,6 +2833,63 @@ def owner_payroll_list(request):
             'status': 'paid' if due == 0 else 'pending',
         })
     return Response({'count': len(results), 'next': None, 'previous': None, 'results': results})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_performance(request):
+    """Performance stats for current staff (waiter/kitchen): orders_served, average_rating, tips, attendance_days. Optional start_date/end_date."""
+    current_staff = _current_staff(request)
+    if current_staff is None:
+        return Response({'detail': 'Not available.'}, status=status.HTTP_403_FORBIDDEN)
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if not owner_ids:
+        return Response({
+            'orders_served': 0,
+            'average_rating': 0,
+            'tips_total': '0',
+            'attendance_days': 0,
+        })
+    start_dt, end_dt = _parse_date_range(request)
+    if start_dt is None or end_dt is None:
+        from datetime import datetime
+        today = timezone.now().date()
+        start_dt = timezone.make_aware(datetime(today.year, today.month, 1))
+        end_dt = timezone.now()
+    start_date, end_date = start_dt.date(), end_dt.date()
+    orders_served = Order.objects.filter(
+        restaurant_id__in=owner_ids,
+        waiter_id=current_staff.id,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).count()
+    feedback_qs = Feedback.objects.filter(
+        restaurant_id__in=owner_ids,
+        order__waiter_id=current_staff.id,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    )
+    rating_agg = feedback_qs.aggregate(avg=Avg('rating'))
+    average_rating = float(rating_agg['avg'] or 0)
+    tips_total = Transaction.objects.filter(
+        paid_record__staff_id=current_staff.id,
+        created_at__gte=start_dt,
+        created_at__lte=end_dt,
+    ).aggregate(s=Sum('amount'))['s'] or Decimal('0')
+    attendance_days = Attendance.objects.filter(
+        staff_id=current_staff.id,
+        date__gte=start_date,
+        date__lte=end_date,
+        status=AttendanceStatus.PRESENT,
+    ).count()
+    return Response({
+        'orders_served': orders_served,
+        'average_rating': round(average_rating, 1),
+        'tips_total': str(tips_total),
+        'attendance_days': attendance_days,
+        'start_date': start_date.isoformat(),
+        'end_date': end_date.isoformat(),
+    })
 
 
 @api_view(['GET'])
@@ -3338,6 +3519,10 @@ def _transaction_queryset(request):
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None:
         qs = qs.filter(restaurant_id__in=owner_ids)
+    # Waiter/kitchen see only their own transactions (via paid_record linked to their staff)
+    current_staff = _current_staff(request)
+    if current_staff is not None and not current_staff.is_manager:
+        qs = qs.filter(paid_record__staff_id=current_staff.id)
     txn_type = (request.query_params.get('transaction_type') or request.query_params.get('type') or '').strip().lower()
     if txn_type in ('in', 'out'):
         qs = qs.filter(transaction_type=txn_type)
@@ -3366,6 +3551,9 @@ def transaction_stats(request):
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None:
         qs = qs.filter(restaurant_id__in=owner_ids)
+    current_staff = _current_staff(request)
+    if current_staff is not None and not current_staff.is_manager:
+        qs = qs.filter(paid_record__staff_id=current_staff.id)
     total_transaction = qs.count()
     total_revenue = qs.filter(transaction_type=TransactionType.IN).aggregate(s=Sum('amount'))['s'] or 0
     pending = qs.filter(payment_status=PaymentStatus.PENDING).count()
@@ -3413,12 +3601,17 @@ def transaction_list(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def transaction_detail(request, pk):
     try:
-        txn = Transaction.objects.select_related('restaurant', 'restaurant__user').get(pk=pk)
+        txn = Transaction.objects.select_related('restaurant', 'restaurant__user', 'paid_record').get(pk=pk)
     except Transaction.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None and (txn.restaurant_id is None or txn.restaurant_id not in owner_ids):
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    # Waiter/kitchen may only view transactions linked to their own staff (paid_record)
+    current_staff = _current_staff(request)
+    if current_staff is not None and not current_staff.is_manager:
+        if not txn.paid_record_id or txn.paid_record.staff_id != current_staff.id:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     serializer = TransactionDetailSerializer(txn, context={'request': request})
     return Response(serializer.data)
 
