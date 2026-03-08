@@ -2642,6 +2642,21 @@ def combos_list(request):
                 data['products'] = json.loads(data['products'])
             except Exception:
                 data['products'] = []
+        # Normalize products: backend expects a list of ints; FormData/some clients send a dict (e.g. {"0": 1, "1": 2})
+        raw_products = data.get('products')
+        if isinstance(raw_products, dict):
+            try:
+                items = sorted(raw_products.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0)
+                data['products'] = [int(v) for _, v in items if v is not None and str(v).strip() != '']
+            except (ValueError, TypeError):
+                data['products'] = []
+        elif isinstance(raw_products, list):
+            try:
+                data['products'] = [int(x) for x in raw_products if x is not None and str(x).strip() != '']
+            except (ValueError, TypeError):
+                data['products'] = []
+        else:
+            data['products'] = []
         if not data.get('restaurant') and len(owner_ids) == 1:
             data['restaurant'] = owner_ids[0]
         if not data.get('restaurant') and len(owner_ids) > 1:
@@ -2695,6 +2710,19 @@ def combo_detail(request, pk):
             try:
                 data['products'] = json.loads(data['products'])
             except Exception:
+                data['products'] = []
+        # Normalize products: list of ints (dict from FormData -> list)
+        raw_products = data.get('products')
+        if isinstance(raw_products, dict):
+            try:
+                items = sorted(raw_products.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0)
+                data['products'] = [int(v) for _, v in items if v is not None and str(v).strip() != '']
+            except (ValueError, TypeError):
+                data['products'] = []
+        elif isinstance(raw_products, list):
+            try:
+                data['products'] = [int(x) for x in raw_products if x is not None and str(x).strip() != '']
+            except (ValueError, TypeError):
                 data['products'] = []
         serializer = ComboSetCreateUpdateSerializer(
             combo, data=data, partial=True,
