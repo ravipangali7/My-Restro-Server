@@ -2212,7 +2212,8 @@ def orders_list(request):
         items_count=Count('items'),
     ).select_related('table', 'waiter', 'waiter__user').order_by('-created_at')
     current_staff = _current_staff(request)
-    if current_staff is not None and not current_staff.is_manager:
+    # Kitchen sees all restaurant orders; waiter sees only their own
+    if current_staff is not None and not current_staff.is_manager and not getattr(current_staff, 'is_kitchen', False):
         qs = qs.filter(waiter_id=current_staff.id)
     status_param = request.query_params.get('status', '').strip()
     if status_param:
@@ -2281,14 +2282,20 @@ def order_detail(request, pk):
     except Order.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     current_staff = _current_staff(request)
-    if current_staff is not None and not current_staff.is_manager and order.waiter_id != current_staff.id:
+    # Kitchen can access any order in restaurant; waiter only their own
+    if current_staff is not None and not current_staff.is_manager and not getattr(current_staff, 'is_kitchen', False) and order.waiter_id != current_staff.id:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'PATCH':
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
         allowed = {}
+        is_kitchen = current_staff is not None and getattr(current_staff, 'is_kitchen', False)
         if 'status' in data and data['status']:
-            allowed['status'] = data['status'].strip()
-        if 'payment_status' in data and data['payment_status']:
+            new_status = data['status'].strip().lower()
+            if is_kitchen and new_status not in ('accepted', 'running', 'ready', 'served'):
+                pass  # Kitchen can only set these statuses
+            else:
+                allowed['status'] = new_status
+        if not is_kitchen and 'payment_status' in data and data['payment_status']:
             allowed['payment_status'] = data['payment_status'].strip()
         if allowed:
             Order.objects.filter(pk=pk).update(**allowed)
@@ -2342,7 +2349,8 @@ def orders_stats(request):
     today = timezone.now().date()
     qs = Order.objects.filter(restaurant_id__in=owner_ids)
     current_staff = _current_staff(request)
-    if current_staff is not None and not current_staff.is_manager:
+    # Kitchen sees all restaurant orders; waiter sees only their own
+    if current_staff is not None and not current_staff.is_manager and not getattr(current_staff, 'is_kitchen', False):
         qs = qs.filter(waiter_id=current_staff.id)
     today_qs = qs.filter(created_at__date=today)
     today_orders_count = today_qs.count()
