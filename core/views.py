@@ -50,6 +50,7 @@ from .models import (
 from .models import PaymentStatus, DiscountType, OrderType
 from .permissions import IsSuperuser, IsSuperuserOrOwner
 from .serializers import (
+    _build_media_url,
     OwnerSerializer,
     OwnerCreateUpdateSerializer,
     OwnerDetailSerializer,
@@ -4233,3 +4234,459 @@ def customer_list(request):
     page = paginator.paginate_queryset(qs, request)
     serializer = CustomerListSerializer(page, many=True, context={'request': request})
     return paginator.get_paginated_response(serializer.data)
+
+
+# ---------- Customer-scoped API (logged-in customer only) ----------
+
+def _current_customer(request):
+    """Return Customer instance for request.user if they have a linked Customer profile; else None."""
+    if not request.user or not request.user.is_authenticated:
+        return None
+    return getattr(request.user, 'customer_profile', None)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def customer_dashboard_stats(request):
+    """Dashboard stats for current customer: orders count, recent orders, restaurants linked, credit summary."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    total_orders = Order.objects.filter(customer=cust).count()
+    recent_orders_count = Order.objects.filter(customer=cust).order_by('-created_at')[:10].count()
+    restaurants_linked = CustomerRestaurant.objects.filter(customer=cust).count()
+    credit_agg = CustomerRestaurant.objects.filter(customer=cust).aggregate(
+        to_pay=Coalesce(Sum('to_pay'), Decimal('0')),
+        to_receive=Coalesce(Sum('to_receive'), Decimal('0')),
+    )
+    feedback_count = Feedback.objects.filter(customer=cust).count()
+    return Response({
+        'total_orders': total_orders,
+        'recent_orders_count': recent_orders_count,
+        'restaurants_linked': restaurants_linked,
+        'total_to_pay': str(credit_agg['to_pay']),
+        'total_to_receive': str(credit_agg['to_receive']),
+        'feedback_count': feedback_count,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def customer_restaurants_list(request):
+    """List restaurants for customer browse (read-only). Paginated."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    qs = Restaurant.objects.all().order_by('name')
+    ordering = (request.query_params.get('ordering') or 'name').strip()
+    if ordering.lstrip('-') in ('name', 'created_at', 'slug'):
+        qs = qs.order_by(ordering)
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    results = []
+    for rest in page:
+        logo_url = None
+        if rest.logo:
+            logo_url = _build_media_url(request, rest.logo.url if hasattr(rest.logo, 'url') else str(rest.logo))
+        results.append({
+            'id': rest.id,
+            'name': rest.name,
+            'slug': rest.slug,
+            'address': rest.address or '',
+            'logo_url': logo_url,
+            'is_open': rest.is_open,
+        })
+    return paginator.get_paginated_response(results)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def customer_restaurant_detail(request, pk):
+    """Restaurant detail + categories + products for customer (read-only menu)."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        rest = Restaurant.objects.get(pk=pk)
+    except Restaurant.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    logo_url = None
+    if rest.logo:
+        logo_url = _build_media_url(request, rest.logo.url if hasattr(rest.logo, 'url') else str(rest.logo))
+    categories_qs = Category.objects.filter(restaurant=rest).order_by('name')
+    categories_data = []
+    for c in categories_qs:
+        cat_image_url = None
+        if c.image:
+            cat_image_url = _build_media_url(request, c.image.url if hasattr(c.image, 'url') else str(c.image))
+        categories_data.append({'id': c.id, 'name': c.name, 'image_url': cat_image_url})
+    products_qs = Product.objects.filter(
+        restaurant=rest, is_active=True,
+    ).select_related('category').prefetch_related('variants', 'variants__unit').order_by('category__name', 'name')
+    products_data = []
+    for p in products_qs:
+        img_url = None
+        if p.image:
+            img_url = _build_media_url(request, p.image.url if hasattr(p.image, 'url') else str(p.image))
+        variants_data = [
+            {'id': v.id, 'unit_name': v.unit.name if v.unit_id else '', 'unit_symbol': v.unit.symbol or '', 'price': str(v.get_final_price())}
+            for v in p.variants.all()
+        ]
+        products_data.append({
+            'id': p.id, 'name': p.name, 'category_id': p.category_id, 'category_name': p.category.name if p.category_id else '',
+            'image_url': img_url, 'dish_type': getattr(p, 'dish_type', 'veg'), 'variants': variants_data,
+        })
+    return Response({
+        'restaurant': {
+            'id': rest.id, 'name': rest.name, 'slug': rest.slug, 'logo_url': logo_url,
+            'address': rest.address or '', 'phone': rest.phone or '', 'is_open': rest.is_open,
+        },
+        'categories': categories_data,
+        'products': products_data,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def customer_orders_list(request):
+    """List orders for current customer. Filters: restaurant, status, payment_status, start_date, end_date."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    qs = Order.objects.filter(customer=cust).annotate(items_count=Count('items')).select_related(
+        'restaurant', 'table', 'waiter', 'waiter__user'
+    ).order_by('-created_at')
+    status_param = request.query_params.get('status', '').strip()
+    if status_param:
+        qs = qs.filter(status=status_param)
+    payment_status_param = request.query_params.get('payment_status', '').strip()
+    if payment_status_param:
+        qs = qs.filter(payment_status=payment_status_param)
+    restaurant_id = request.query_params.get('restaurant', '').strip()
+    if restaurant_id:
+        try:
+            qs = qs.filter(restaurant_id=int(restaurant_id))
+        except (TypeError, ValueError):
+            pass
+    start_date = request.query_params.get('start_date', '').strip()[:10]
+    if start_date:
+        try:
+            qs = qs.filter(created_at__date__gte=start_date)
+        except (TypeError, ValueError):
+            pass
+    end_date = request.query_params.get('end_date', '').strip()[:10]
+    if end_date:
+        try:
+            qs = qs.filter(created_at__date__lte=end_date)
+        except (TypeError, ValueError):
+            pass
+    # Stats for this customer
+    stats_qs = Order.objects.filter(customer=cust)
+    total_orders = stats_qs.count()
+    pending_count = stats_qs.filter(status='pending').count()
+    paid_count = stats_qs.filter(payment_status='paid').count()
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    results = []
+    for o in page:
+        results.append({
+            'id': o.id,
+            'restaurant_id': o.restaurant_id,
+            'restaurant_name': o.restaurant.name if o.restaurant_id else '',
+            'table_number': o.table_number or (o.table.name if o.table_id else ''),
+            'order_type': o.order_type,
+            'total': str(o.total),
+            'status': o.status,
+            'payment_status': o.payment_status,
+            'items_count': getattr(o, 'items_count', 0),
+            'created_at': o.created_at.isoformat() if hasattr(o.created_at, 'isoformat') else str(o.created_at),
+        })
+    resp = paginator.get_paginated_response(results)
+    resp.data['stats'] = {'total_orders': total_orders, 'pending_count': pending_count, 'paid_count': paid_count}
+    return resp
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def customer_order_detail(request, pk):
+    """Order detail for current customer (own order only)."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        order = Order.objects.filter(customer=cust).select_related(
+            'restaurant', 'table', 'waiter', 'waiter__user'
+        ).prefetch_related(
+            'items__product', 'items__product_variant', 'items__product_variant__product', 'items__combo_set'
+        ).get(pk=pk)
+    except Order.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    items = []
+    subtotal = Decimal('0')
+    for item in order.items.all():
+        line_total = item.total
+        subtotal += line_total
+        items.append({
+            'id': item.id,
+            'name': _order_item_name(item),
+            'quantity': str(item.quantity),
+            'price': str(item.price),
+            'total': str(line_total),
+        })
+    has_feedback = Feedback.objects.filter(order=order, customer=cust).exists()
+    return Response({
+        'id': order.id,
+        'restaurant_id': order.restaurant_id,
+        'restaurant_name': order.restaurant.name if order.restaurant_id else '',
+        'table_number': order.table_number or (order.table.name if order.table_id else ''),
+        'order_type': order.order_type,
+        'status': order.status,
+        'payment_status': order.payment_status,
+        'payment_method': order.payment_method or '',
+        'subtotal': str(subtotal),
+        'service_charge': str(order.service_charge) if order.service_charge is not None else None,
+        'discount': str(order.discount) if order.discount is not None else None,
+        'total': str(order.total),
+        'created_at': order.created_at.isoformat() if hasattr(order.created_at, 'isoformat') else str(order.created_at),
+        'items': items,
+        'has_feedback': has_feedback,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def customer_transactions_list(request):
+    """List received records (payments) for current customer. Read-only."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    qs = ReceivedRecord.objects.filter(customer=cust).select_related(
+        'restaurant', 'order'
+    ).order_by('-created_at')
+    start_date = request.query_params.get('start_date', '').strip()[:10]
+    if start_date:
+        try:
+            qs = qs.filter(created_at__date__gte=start_date)
+        except (TypeError, ValueError):
+            pass
+    end_date = request.query_params.get('end_date', '').strip()[:10]
+    if end_date:
+        try:
+            qs = qs.filter(created_at__date__lte=end_date)
+        except (TypeError, ValueError):
+            pass
+    total_amount = qs.aggregate(s=Sum('amount'))['s'] or Decimal('0')
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    results = []
+    for r in page:
+        results.append({
+            'id': r.id,
+            'date': r.created_at.isoformat() if hasattr(r.created_at, 'isoformat') else str(r.created_at),
+            'type': 'payment',
+            'amount': str(r.amount),
+            'payment_method': r.payment_method or '',
+            'reference': str(r.order_id) if r.order_id else str(r.id),
+            'restaurant_id': r.restaurant_id,
+            'restaurant_name': r.restaurant.name if r.restaurant_id else '',
+            'order_id': r.order_id,
+        })
+    return Response({
+        'stats': {'total_amount': str(total_amount), 'count': qs.count()},
+        'count': paginator.page.paginator.count,
+        'next': paginator.get_next_link(),
+        'previous': paginator.get_previous_link(),
+        'results': results,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def customer_transaction_detail(request, pk):
+    """Single received record for current customer."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        r = ReceivedRecord.objects.filter(customer=cust).select_related('restaurant', 'order').get(pk=pk)
+    except ReceivedRecord.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    return Response({
+        'id': r.id,
+        'date': r.created_at.isoformat() if hasattr(r.created_at, 'isoformat') else str(r.created_at),
+        'type': 'payment',
+        'amount': str(r.amount),
+        'payment_method': r.payment_method or '',
+        'reference': str(r.order_id) if r.order_id else str(r.id),
+        'restaurant_id': r.restaurant_id,
+        'restaurant_name': r.restaurant.name if r.restaurant_id else '',
+        'order_id': r.order_id,
+        'remarks': r.remarks or '',
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def customer_credits_list(request):
+    """Credits/balance per restaurant for current customer. Read-only."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    qs = CustomerRestaurant.objects.filter(customer=cust).select_related('restaurant').order_by('restaurant__name')
+    agg = qs.aggregate(
+        total_to_pay=Coalesce(Sum('to_pay'), Decimal('0')),
+        total_to_receive=Coalesce(Sum('to_receive'), Decimal('0')),
+    )
+    results = []
+    for cr in qs:
+        results.append({
+            'id': cr.id,
+            'restaurant_id': cr.restaurant_id,
+            'restaurant_name': cr.restaurant.name if cr.restaurant_id else '',
+            'to_pay': str(cr.to_pay),
+            'to_receive': str(cr.to_receive),
+            'updated_at': cr.updated_at.isoformat() if hasattr(cr.updated_at, 'isoformat') else str(cr.updated_at),
+        })
+    return Response({
+        'stats': {
+            'total_to_pay': str(agg['total_to_pay']),
+            'total_to_receive': str(agg['total_to_receive']),
+            'restaurants_linked': qs.count(),
+        },
+        'results': results,
+    })
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def customer_feedback_list(request):
+    """GET: List feedback for current customer. POST: Create feedback for an order."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method == 'POST':
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        order_id = data.get('order_id') or data.get('order')
+        if not order_id:
+            return Response({'detail': 'order_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            order_id = int(order_id)
+        except (TypeError, ValueError):
+            return Response({'detail': 'Invalid order_id.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            order = Order.objects.filter(customer=cust).get(pk=order_id)
+        except Order.DoesNotExist:
+            return Response({'detail': 'Order not found or not yours.'}, status=status.HTTP_404_NOT_FOUND)
+        if Feedback.objects.filter(order=order, customer=cust).exists():
+            return Response({'detail': 'Feedback already submitted for this order.'}, status=status.HTTP_400_BAD_REQUEST)
+        rating = data.get('rating')
+        if rating is None:
+            return Response({'detail': 'rating is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            rating = int(rating)
+        except (TypeError, ValueError):
+            return Response({'detail': 'Invalid rating.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not 1 <= rating <= 5:
+            return Response({'detail': 'Rating must be between 1 and 5.'}, status=status.HTTP_400_BAD_REQUEST)
+        review = (data.get('review') or '').strip()
+        Feedback.objects.create(
+            restaurant=order.restaurant,
+            customer=cust,
+            order=order,
+            rating=rating,
+            review=review,
+        )
+        return Response({'detail': 'Feedback submitted.'}, status=status.HTTP_201_CREATED)
+    qs = Feedback.objects.filter(customer=cust).select_related('restaurant', 'order').order_by('-created_at')
+    from django.db.models import Avg
+    avg_rating = qs.aggregate(a=Avg('rating'))['a']
+    total = qs.count()
+    by_rating = dict(Feedback.objects.filter(customer=cust).values('rating').annotate(c=Count('id')).values_list('rating', 'c'))
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = FeedbackListSerializer(page, many=True, context={'request': request})
+    data = serializer.data
+    for i, row in enumerate(data):
+        if i < len(page):
+            row['restaurant_id'] = page[i].restaurant_id
+            row['restaurant_name'] = page[i].restaurant.name if page[i].restaurant_id else ''
+    return Response({
+        'stats': {
+            'average_rating': float(avg_rating) if avg_rating is not None else None,
+            'total': total,
+            'by_rating': by_rating,
+        },
+        'count': paginator.page.paginator.count,
+        'next': paginator.get_next_link(),
+        'previous': paginator.get_previous_link(),
+        'results': data,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def customer_feedback_detail(request, pk):
+    """Single feedback for current customer."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        fb = Feedback.objects.filter(customer=cust).select_related('restaurant', 'order').get(pk=pk)
+    except Feedback.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    serializer = FeedbackDetailSerializer(fb, context={'request': request})
+    data = serializer.data
+    data['restaurant_id'] = fb.restaurant_id
+    data['restaurant_name'] = fb.restaurant.name if fb.restaurant_id else ''
+    data['order_id'] = fb.order_id
+    return Response(data)
+
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def customer_me(request):
+    """GET: Customer profile. PATCH: Update name, phone, country_code, address. Sync to User when present."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method == 'GET':
+        return Response({
+            'id': cust.id,
+            'name': cust.name,
+            'phone': cust.phone,
+            'country_code': cust.country_code,
+            'address': cust.address or '',
+        })
+    # PATCH
+    data = request.data
+    updated = False
+    if 'name' in data and data['name'] is not None:
+        cust.name = data['name']
+        updated = True
+    if 'phone' in data and data['phone'] is not None:
+        cust.phone = str(data['phone']).strip()
+        updated = True
+    if 'country_code' in data and data['country_code'] is not None:
+        cust.country_code = str(data['country_code']).strip()
+        updated = True
+    if 'address' in data:
+        cust.address = (data['address'] or '').strip()
+        updated = True
+    if updated:
+        cust.save()
+        if cust.user_id:
+            user = cust.user
+            if 'name' in data and data['name'] is not None:
+                user.name = data['name']
+            if 'phone' in data and data['phone'] is not None:
+                user.phone = str(data['phone']).strip()
+            if 'country_code' in data and data['country_code'] is not None:
+                user.country_code = str(data['country_code']).strip()
+            user.save()
+    return Response({
+        'id': cust.id,
+        'name': cust.name,
+        'phone': cust.phone,
+        'country_code': cust.country_code,
+        'address': cust.address or '',
+    })

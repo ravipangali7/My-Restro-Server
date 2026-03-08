@@ -125,4 +125,16 @@ urlpatterns = [
     path('public/restaurant/<slug:slug>/order/', views.public_order_create),
     # Customers (super admin, for receiver picker)
     path('customers/', views.customer_list),
+    # Customer-scoped API (logged-in customer only)
+    path('customer/dashboard-stats/', views.customer_dashboard_stats),
+    path('customer/me/', views.customer_me),
+    path('customer/restaurants/', views.customer_restaurants_list),
+    path('customer/restaurants/<int:pk>/', views.customer_restaurant_detail),
+    path('customer/orders/', views.customer_orders_list),
+    path('customer/orders/<int:pk>/', views.customer_order_detail),
+    path('customer/transactions/', views.customer_transactions_list),
+    path('customer/transactions/<int:pk>/', views.customer_transaction_detail),
+    path('customer/credits/', views.customer_credits_list),
+    path('customer/feedback/', views.customer_feedback_list),
+    path('customer/feedback/<int:pk>/', views.customer_feedback_detail),
 ]
