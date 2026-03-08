@@ -2655,6 +2655,16 @@ def combos_list(request):
                 data['products'] = [int(x) for x in raw_products if x is not None and str(x).strip() != '']
             except (ValueError, TypeError):
                 data['products'] = []
+        elif isinstance(raw_products, (int, float)) and not isinstance(raw_products, bool):
+            try:
+                data['products'] = [int(raw_products)]
+            except (ValueError, TypeError):
+                data['products'] = []
+        elif isinstance(raw_products, str) and raw_products.strip():
+            try:
+                data['products'] = [int(raw_products.strip())]
+            except (ValueError, TypeError):
+                data['products'] = []
         else:
             data['products'] = []
         if not data.get('restaurant') and len(owner_ids) == 1:
@@ -2724,6 +2734,18 @@ def combo_detail(request, pk):
                 data['products'] = [int(x) for x in raw_products if x is not None and str(x).strip() != '']
             except (ValueError, TypeError):
                 data['products'] = []
+        elif isinstance(raw_products, (int, float)) and not isinstance(raw_products, bool):
+            try:
+                data['products'] = [int(raw_products)]
+            except (ValueError, TypeError):
+                data['products'] = []
+        elif isinstance(raw_products, str) and raw_products.strip():
+            try:
+                data['products'] = [int(raw_products.strip())]
+            except (ValueError, TypeError):
+                data['products'] = []
+        else:
+            data['products'] = []
         serializer = ComboSetCreateUpdateSerializer(
             combo, data=data, partial=True,
             context={'request': request, 'owner_ids': owner_ids},

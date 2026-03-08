@@ -1180,12 +1180,46 @@ class ComboSetDetailSerializer(serializers.ModelSerializer):
         return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
 
 
+def _normalize_products_to_list(value):
+    """Normalize products from dict/list/single value to a list of ints for combo serializer."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        try:
+            items = sorted(value.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0)
+            return [int(v) for _, v in items if v is not None and str(v).strip() != '']
+        except (ValueError, TypeError):
+            return []
+    if isinstance(value, list):
+        try:
+            return [int(x) for x in value if x is not None and str(x).strip() != '']
+        except (ValueError, TypeError):
+            return []
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return [int(value)]
+        except (ValueError, TypeError):
+            return []
+    if isinstance(value, str) and value.strip():
+        try:
+            return [int(value.strip())]
+        except (ValueError, TypeError):
+            return []
+    return []
+
+
 class ComboSetCreateUpdateSerializer(serializers.ModelSerializer):
     products = serializers.ListField(child=serializers.IntegerField(), write_only=True, required=False)
 
     class Meta:
         model = ComboSet
         fields = ['name', 'description', 'image', 'restaurant', 'price', 'products']
+
+    def to_internal_value(self, data):
+        data = data.copy() if hasattr(data, 'copy') else dict(data)
+        raw = data.get('products')
+        data['products'] = _normalize_products_to_list(raw)
+        return super().to_internal_value(data)
 
     def validate_restaurant(self, value):
         owner_ids = self.context.get('owner_ids')
