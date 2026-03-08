@@ -4386,8 +4386,24 @@ def customer_restaurant_detail(request, pk):
     })
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def customer_restaurant_tables(request, pk):
+    """List tables for a restaurant (read-only). Used by customer to choose table for Table/Packing order type."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        rest = Restaurant.objects.get(pk=pk)
+    except Restaurant.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    tables = Table.objects.filter(restaurant=rest).order_by('floor', 'name')
+    results = [{'id': t.id, 'name': t.name} for t in tables]
+    return Response({'results': results})
+
+
 def _customer_order_create(request):
-    """Create order for logged-in customer. Body: restaurant_id, items, order_type, payment_method, table_number?, address?."""
+    """Create order for logged-in customer. Body: restaurant_id, items, order_type, payment_method (cash|e_wallet only), table_id?, table_number?, address?. Service charge fixed at 10 NPR."""
     cust = _current_customer(request)
     if not cust:
         return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
@@ -4408,11 +4424,27 @@ def _customer_order_create(request):
     order_type_raw = (data.get('order_type') or 'table').strip().lower()
     if order_type_raw not in (OrderType.TABLE, OrderType.PACKING, OrderType.DELIVERY):
         order_type_raw = OrderType.TABLE
+    # Customer orders: only Cash or Online (e_wallet) allowed
     payment_method = (data.get('payment_method') or '').strip() or None
-    if payment_method and payment_method not in ('cash', 'e_wallet', 'bank'):
-        payment_method = None
+    if payment_method not in ('cash', 'e_wallet'):
+        payment_method = 'cash'
+    table_id = data.get('table_id')
     table_number = (data.get('table_number') or '').strip() or None
     address = (data.get('address') or '').strip() or None
+    # Optional table_id: must belong to this restaurant
+    if table_id is not None:
+        try:
+            tbl = Table.objects.filter(pk=table_id, restaurant_id=rest.id).first()
+            if tbl:
+                table_id = tbl.id
+                if not table_number:
+                    table_number = tbl.name
+            else:
+                table_id = None
+        except (TypeError, ValueError):
+            table_id = None
+    else:
+        table_id = None
     items_data = data.get('items') or []
     if not items_data:
         return Response({'detail': 'At least one item is required.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -4460,12 +4492,13 @@ def _customer_order_create(request):
             })
     if not line_items:
         return Response({'detail': 'No valid items.'}, status=status.HTTP_400_BAD_REQUEST)
-    service_charge = getattr(rest, 'default_service_charge', None) or Decimal('0')
+    # Fixed 10 NPR service charge for customer-created orders (do not accept from client)
+    service_charge = Decimal('10')
     order_total_with_charge = order_total + service_charge
     order = Order.objects.create(
         restaurant=rest,
         customer=cust,
-        table_id=None,
+        table_id=table_id,
         table_number=table_number,
         order_type=order_type_raw,
         address=address,

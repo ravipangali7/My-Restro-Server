@@ -130,6 +130,7 @@ urlpatterns = [
     path('customer/me/', views.customer_me),
     path('customer/restaurants/', views.customer_restaurants_list),
     path('customer/restaurants/<int:pk>/', views.customer_restaurant_detail),
+    path('customer/restaurants/<int:pk>/tables/', views.customer_restaurant_tables),
     path('customer/orders/', views.customer_orders_list),
     path('customer/orders/<int:pk>/', views.customer_order_detail),
     path('customer/transactions/', views.customer_transactions_list),
