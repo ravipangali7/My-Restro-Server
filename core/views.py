@@ -927,13 +927,23 @@ def owner_attendance_list(request):
         if status_val not in ('present', 'absent', 'leave'):
             status_val = 'absent'
         leave_reason = (request.data.get('leave_reason') or '').strip()
+        if status_val == 'leave' and not leave_reason:
+            return Response(
+                {'leave_reason': ['Leave reason is required when status is leave.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         att, created = Attendance.objects.get_or_create(
             restaurant_id=rid, staff=staff, date=att_date,
-            defaults={'status': status_val, 'leave_reason': leave_reason},
+            defaults={
+                'status': status_val,
+                'leave_reason': leave_reason,
+                'created_by': request.user,
+            },
         )
         if not created:
             att.status = status_val
             att.leave_reason = leave_reason
+            att.created_by = request.user
             att.save()
         return Response({
             'id': att.id,
@@ -1027,6 +1037,8 @@ def owner_attendance_detail(request, pk):
         serializer = AttendanceUpdateSerializer(att, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
+            att.created_by = request.user
+            att.save(update_fields=['created_by'])
             att.refresh_from_db()
             return Response({
                 'id': att.id,

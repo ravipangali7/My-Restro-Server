@@ -863,6 +863,18 @@ class AttendanceUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('Status must be present, absent, or leave.')
         return value.lower() if value else value
 
+    def validate(self, attrs):
+        status_val = attrs.get('status', getattr(self.instance, 'status', None) if self.instance else None)
+        if status_val == 'leave':
+            leave_reason = (attrs.get('leave_reason') or '').strip()
+            if not leave_reason and self.instance:
+                leave_reason = (getattr(self.instance, 'leave_reason') or '').strip()
+            if not leave_reason:
+                raise serializers.ValidationError({
+                    'leave_reason': ['Leave reason is required when status is leave.'],
+                })
+        return attrs
+
 
 # --- Feedback (owner/manager) ---
 
