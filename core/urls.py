@@ -7,6 +7,9 @@ urlpatterns = [
     path('auth/register/', auth_views.register),
     path('auth/me/', auth_views.me),
     path('auth/logout/', auth_views.logout),
+    path('auth/forgot-password/request-otp/', auth_views.forgot_password_request_otp),
+    path('auth/forgot-password/verify-otp/', auth_views.forgot_password_verify_otp),
+    path('auth/forgot-password/set-password/', auth_views.forgot_password_set_password),
     # Owner (scoped dashboard and lists)
     path('owner/dashboard-stats/', views.owner_dashboard_stats),
     path('owner/my-restaurant/', views.owner_my_restaurant),
