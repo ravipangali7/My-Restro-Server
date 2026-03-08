@@ -4374,20 +4374,133 @@ def customer_restaurant_detail(request, pk):
             'id': p.id, 'name': p.name, 'category_id': p.category_id, 'category_name': p.category.name if p.category_id else '',
             'image_url': img_url, 'dish_type': getattr(p, 'dish_type', 'veg'), 'variants': variants_data,
         })
+    default_service_charge = getattr(rest, 'default_service_charge', None)
     return Response({
         'restaurant': {
             'id': rest.id, 'name': rest.name, 'slug': rest.slug, 'logo_url': logo_url,
             'address': rest.address or '', 'phone': rest.phone or '', 'is_open': rest.is_open,
+            'default_service_charge': str(default_service_charge) if default_service_charge is not None else '0',
         },
         'categories': categories_data,
         'products': products_data,
     })
 
 
-@api_view(['GET'])
+def _customer_order_create(request):
+    """Create order for logged-in customer. Body: restaurant_id, items, order_type, payment_method, table_number?, address?."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    data = request.data if hasattr(request.data, 'get') else {}
+    restaurant_id = data.get('restaurant_id')
+    if not restaurant_id:
+        return Response({'detail': 'restaurant_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        restaurant_id = int(restaurant_id)
+    except (TypeError, ValueError):
+        return Response({'detail': 'Valid restaurant_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        rest = Restaurant.objects.get(pk=restaurant_id)
+    except Restaurant.DoesNotExist:
+        return Response({'detail': 'Restaurant not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if not rest.is_open:
+        return Response({'detail': 'Restaurant is currently closed.'}, status=status.HTTP_400_BAD_REQUEST)
+    order_type_raw = (data.get('order_type') or 'table').strip().lower()
+    if order_type_raw not in (OrderType.TABLE, OrderType.PACKING, OrderType.DELIVERY):
+        order_type_raw = OrderType.TABLE
+    payment_method = (data.get('payment_method') or '').strip() or None
+    if payment_method and payment_method not in ('cash', 'e_wallet', 'bank'):
+        payment_method = None
+    table_number = (data.get('table_number') or '').strip() or None
+    address = (data.get('address') or '').strip() or None
+    items_data = data.get('items') or []
+    if not items_data:
+        return Response({'detail': 'At least one item is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    order_total = Decimal('0')
+    line_items = []
+    for row in items_data:
+        qty = Decimal(str(row.get('quantity') or 1))
+        if qty <= 0:
+            continue
+        pv_id = row.get('product_variant_id')
+        prod_id = row.get('product_id')
+        unit_price = None
+        product_variant_id = None
+        product_id = None
+        if pv_id:
+            try:
+                pv = ProductVariant.objects.select_related('product').get(
+                    pk=pv_id, product__restaurant_id=rest.id
+                )
+                unit_price = pv.get_final_price()
+                product_variant_id = pv.id
+                product_id = pv.product_id
+            except (ProductVariant.DoesNotExist, TypeError, ValueError):
+                pass
+        if unit_price is None and prod_id:
+            try:
+                prod = Product.objects.filter(pk=prod_id, restaurant_id=rest.id, is_active=True).first()
+                if prod:
+                    first_v = prod.variants.first()
+                    if first_v:
+                        unit_price = first_v.get_final_price()
+                        product_variant_id = first_v.id
+                        product_id = prod.id
+            except Exception:
+                pass
+        if unit_price is not None and (product_variant_id or product_id):
+            line_total = unit_price * qty
+            order_total += line_total
+            line_items.append({
+                'product_id': product_id,
+                'product_variant_id': product_variant_id,
+                'price': unit_price,
+                'quantity': qty,
+                'total': line_total,
+            })
+    if not line_items:
+        return Response({'detail': 'No valid items.'}, status=status.HTTP_400_BAD_REQUEST)
+    service_charge = getattr(rest, 'default_service_charge', None) or Decimal('0')
+    order_total_with_charge = order_total + service_charge
+    order = Order.objects.create(
+        restaurant=rest,
+        customer=cust,
+        table_id=None,
+        table_number=table_number,
+        order_type=order_type_raw,
+        address=address,
+        status='pending',
+        payment_status='pending',
+        payment_method=payment_method or '',
+        waiter_id=None,
+        total=order_total_with_charge,
+        service_charge=service_charge,
+    )
+    for line in line_items:
+        OrderItem.objects.create(
+            order=order,
+            product_id=line.get('product_id'),
+            product_variant_id=line.get('product_variant_id'),
+            combo_set_id=None,
+            price=line['price'],
+            quantity=line['quantity'],
+            total=line['total'],
+        )
+    order.refresh_from_db()
+    return Response({
+        'order_id': order.id,
+        'total': str(order.total),
+        'service_charge': str(order.service_charge) if order.service_charge is not None else '0',
+        'message': 'Order placed successfully.',
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def customer_orders_list(request):
-    """List orders for current customer. Filters: restaurant, status, payment_status, start_date, end_date."""
+    """GET: List orders for current customer. POST: Create order for current customer."""
+    if request.method == 'POST':
+        return _customer_order_create(request)
     cust = _current_customer(request)
     if not cust:
         return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
