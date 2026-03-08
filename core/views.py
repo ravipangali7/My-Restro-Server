@@ -4527,6 +4527,91 @@ def customer_transaction_detail(request, pk):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+def customer_transactions_analytics(request):
+    """Order-based transaction analytics for current customer: table rows, by_restaurant, top_products, monthly trend."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    qs = Order.objects.filter(customer=cust).select_related('restaurant').prefetch_related(
+        'items__product', 'items__product_variant', 'items__product_variant__product', 'items__combo_set'
+    ).order_by('-created_at')
+    start_date = request.query_params.get('start_date', '').strip()[:10]
+    if start_date:
+        try:
+            qs = qs.filter(created_at__date__gte=start_date)
+        except (TypeError, ValueError):
+            pass
+    end_date = request.query_params.get('end_date', '').strip()[:10]
+    if end_date:
+        try:
+            qs = qs.filter(created_at__date__lte=end_date)
+        except (TypeError, ValueError):
+            pass
+    orders = list(qs)
+    table_rows = []
+    by_restaurant_map = {}
+    product_totals = {}
+    for order in orders:
+        product_names = []
+        for item in order.items.all():
+            name = _order_item_name(item)
+            product_names.append(name)
+            product_totals[name] = product_totals.get(name, {'total': Decimal('0'), 'count': 0})
+            product_totals[name]['total'] += item.total
+            product_totals[name]['count'] += 1
+        table_rows.append({
+            'date': order.created_at.isoformat() if hasattr(order.created_at, 'isoformat') else str(order.created_at),
+            'restaurant_name': order.restaurant.name if order.restaurant_id else '',
+            'order_id': order.id,
+            'products': product_names,
+            'amount_paid': str(order.total),
+            'payment_method': order.payment_method or '',
+        })
+        rname = order.restaurant.name if order.restaurant_id else ''
+        if rname not in by_restaurant_map:
+            by_restaurant_map[rname] = {'total_paid': Decimal('0'), 'order_count': 0}
+        by_restaurant_map[rname]['total_paid'] += order.total
+        by_restaurant_map[rname]['order_count'] += 1
+    by_restaurant = [
+        {'restaurant_name': k, 'total_paid': str(v['total_paid']), 'order_count': v['order_count']}
+        for k, v in by_restaurant_map.items()
+    ]
+    top_products = sorted(
+        [{'product_name': k, 'total_spent': str(v['total']), 'count': v['count']} for k, v in product_totals.items()],
+        key=lambda x: Decimal(x['total_spent']),
+        reverse=True,
+    )[:10]
+    monthly_qs = Order.objects.filter(customer=cust)
+    if start_date:
+        try:
+            monthly_qs = monthly_qs.filter(created_at__date__gte=start_date)
+        except (TypeError, ValueError):
+            pass
+    if end_date:
+        try:
+            monthly_qs = monthly_qs.filter(created_at__date__lte=end_date)
+        except (TypeError, ValueError):
+            pass
+    monthly_agg = list(
+        monthly_qs.annotate(month=TruncMonth('created_at'))
+        .values('month')
+        .annotate(total=Coalesce(Sum('total'), Decimal('0')))
+        .order_by('month')
+    )
+    monthly = [
+        {'month': (m['month'].strftime('%Y-%m') if m['month'] else ''), 'total': str(m['total'])}
+        for m in monthly_agg
+    ]
+    return Response({
+        'table_rows': table_rows,
+        'by_restaurant': by_restaurant,
+        'top_products': top_products,
+        'monthly': monthly,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def customer_credits_list(request):
     """Credits/balance per restaurant for current customer. Read-only."""
     cust = _current_customer(request)

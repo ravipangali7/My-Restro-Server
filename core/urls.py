@@ -133,6 +133,7 @@ urlpatterns = [
     path('customer/orders/', views.customer_orders_list),
     path('customer/orders/<int:pk>/', views.customer_order_detail),
     path('customer/transactions/', views.customer_transactions_list),
+    path('customer/transactions/analytics/', views.customer_transactions_analytics),
     path('customer/transactions/<int:pk>/', views.customer_transaction_detail),
     path('customer/credits/', views.customer_credits_list),
     path('customer/feedback/', views.customer_feedback_list),
