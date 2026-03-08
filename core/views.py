@@ -686,7 +686,7 @@ def owner_dashboard_stats(request):
         # Customers count (distinct customers with orders at these restaurants)
         customers_count = Customer.objects.filter(
             orders__restaurant_id__in=owner_ids,
-        ).distinct().count()
+        ).exclude(user__is_restaurant_staff=True).distinct().count()
         payload['customers_count'] = customers_count
 
         # Single restaurant: include slug, name, logo for manager dashboard / Menu QR
@@ -3145,7 +3145,7 @@ def owner_report_customers(request):
     customer_ids = [x for x in customer_ids if x is not None]
     if not customer_ids:
         return Response({'results': []})
-    qs = Customer.objects.filter(id__in=customer_ids)
+    qs = Customer.objects.filter(id__in=customer_ids).exclude(user__is_restaurant_staff=True)
     results = []
     for c in qs:
         oq = Order.objects.filter(customer=c, restaurant_id__in=owner_ids)

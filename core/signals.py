@@ -12,6 +12,7 @@ from django.dispatch import receiver
 from .models import (
     Attendance,
     AttendanceStatus,
+    Customer,
     CustomerRestaurant,
     Expenses,
     Order,
@@ -135,6 +136,18 @@ def on_attendance_save(sender, instance, created, **kwargs):
             Staff.objects.filter(pk=instance.staff_id).update(
                 to_pay=F("to_pay") + salary
             )
+
+
+@receiver(post_save, sender=Staff)
+def on_staff_save(sender, instance, **kwargs):
+    """When a user becomes Staff (API or Admin), mark user as restaurant staff and remove from Customer table."""
+    if not instance.pk:
+        return
+    user = instance.user
+    if not user.is_restaurant_staff:
+        user.is_restaurant_staff = True
+        user.save(update_fields=["is_restaurant_staff"])
+    Customer.objects.filter(user=user).delete()
 
 
 @receiver(post_save, sender=PaidRecord)
