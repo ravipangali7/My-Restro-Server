@@ -836,6 +836,9 @@ class OwnerStaffCreateUpdateSerializer(serializers.ModelSerializer):
         instance = super().update(instance, validated_data)
         if assigned_table_ids is not None:
             instance.assigned_tables.set(assigned_table_ids)
+        user = instance.user
+        user.is_restaurant_staff = True
+        user.save(update_fields=['is_restaurant_staff'])
         return instance
 
 

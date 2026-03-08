@@ -529,6 +529,16 @@ def owner_dashboard_stats(request):
             date=today,
         ).first()
         attendance_status = my_attendance_today.status if my_attendance_today else 'unmarked'
+        # My orders by day (last 7 days) for line chart
+        my_orders_by_day = []
+        for i in range(6, -1, -1):
+            d = today - timedelta(days=i)
+            cnt = Order.objects.filter(
+                restaurant_id__in=owner_ids,
+                waiter_id=current_staff.id,
+                created_at__date=d,
+            ).count()
+            my_orders_by_day.append({'date': d.isoformat(), 'count': cnt})
         single_rest = Restaurant.objects.filter(id=owner_ids[0]).first() if owner_ids else None
         payload = {
             'my_orders_today': my_orders_today,
@@ -536,6 +546,7 @@ def owner_dashboard_stats(request):
             'recent_orders': recent_orders,
             'attendance_today_status': attendance_status,
             'restaurant_id': owner_ids[0] if len(owner_ids) == 1 else None,
+            'my_orders_by_day': my_orders_by_day,
         }
         if single_rest:
             from .serializers import _build_media_url
@@ -595,6 +606,14 @@ def owner_dashboard_stats(request):
         }
         for t in recent
     ]
+    # Orders by day (last 7 days) for line chart (owner/manager/kitchen)
+    today = timezone.now().date()
+    orders_by_day = []
+    for i in range(6, -1, -1):
+        d = today - timedelta(days=i)
+        cnt = Order.objects.filter(restaurant_id__in=owner_ids, created_at__date=d).count()
+        orders_by_day.append({'date': d.isoformat(), 'count': cnt})
+    total_orders_all_time = Order.objects.filter(restaurant_id__in=owner_ids).count()
     payload = {
         'restaurants_count': restaurants_count,
         'staff_count': staff_count,
@@ -602,6 +621,8 @@ def owner_dashboard_stats(request):
         'total_due': str(total_due),
         'active_restaurants': active_restaurants,
         'recent_transactions': recent_data,
+        'orders_by_day': orders_by_day,
+        'total_orders_all_time': total_orders_all_time,
     }
     if order_count is not None:
         payload['order_count'] = order_count
@@ -2390,11 +2411,17 @@ def orders_stats(request):
     pending_count = qs.filter(status='pending').count()
     revenue_today = today_qs.filter(payment_status='paid').aggregate(s=Sum('total'))['s'] or Decimal('0')
     by_status = dict(qs.values('status').annotate(c=Count('id')).values_list('status', 'c'))
+    orders_by_day = []
+    for i in range(6, -1, -1):
+        d = today - timedelta(days=i)
+        cnt = qs.filter(created_at__date=d).count()
+        orders_by_day.append({'date': d.isoformat(), 'count': cnt})
     return Response({
         'today_orders_count': today_orders_count,
         'pending_count': pending_count,
         'revenue_today': str(revenue_today),
         'by_status': by_status,
+        'orders_by_day': orders_by_day,
     })
 
 
@@ -4359,6 +4386,13 @@ def customer_dashboard_stats(request):
         to_receive=Coalesce(Sum('to_receive'), Decimal('0')),
     )
     feedback_count = Feedback.objects.filter(customer=cust).count()
+    # Orders by day (last 7 days) for line chart
+    today = timezone.now().date()
+    orders_by_day = []
+    for i in range(6, -1, -1):
+        d = today - timedelta(days=i)
+        cnt = Order.objects.filter(customer=cust, created_at__date=d).count()
+        orders_by_day.append({'date': d.isoformat(), 'count': cnt})
     return Response({
         'total_orders': total_orders,
         'recent_orders_count': recent_orders_count,
@@ -4366,6 +4400,7 @@ def customer_dashboard_stats(request):
         'total_to_pay': str(credit_agg['to_pay']),
         'total_to_receive': str(credit_agg['to_receive']),
         'feedback_count': feedback_count,
+        'orders_by_day': orders_by_day,
     })
 
 
@@ -4972,51 +5007,55 @@ def customer_feedback_detail(request, pk):
     return Response(data)
 
 
-@api_view(['GET', 'PATCH'])
-@permission_classes([IsAuthenticated])
-def customer_me(request):
-    """GET: Customer profile. PATCH: Update name, phone, country_code, address. Sync to User when present."""
-    cust = _current_customer(request)
-    if not cust:
-        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
-    if request.method == 'GET':
-        return Response({
-            'id': cust.id,
-            'name': cust.name,
-            'phone': cust.phone,
-            'country_code': cust.country_code,
-            'address': cust.address or '',
-        })
-    # PATCH
-    data = request.data
-    updated = False
-    if 'name' in data and data['name'] is not None:
-        cust.name = data['name']
-        updated = True
-    if 'phone' in data and data['phone'] is not None:
-        cust.phone = str(data['phone']).strip()
-        updated = True
-    if 'country_code' in data and data['country_code'] is not None:
-        cust.country_code = str(data['country_code']).strip()
-        updated = True
-    if 'address' in data:
-        cust.address = (data['address'] or '').strip()
-        updated = True
-    if updated:
-        cust.save()
-        if cust.user_id:
-            user = cust.user
-            if 'name' in data and data['name'] is not None:
-                user.name = data['name']
-            if 'phone' in data and data['phone'] is not None:
-                user.phone = str(data['phone']).strip()
-            if 'country_code' in data and data['country_code'] is not None:
-                user.country_code = str(data['country_code']).strip()
-            user.save()
-    return Response({
+def _customer_me_response(cust, request):
+    """Build GET/PATCH response for customer profile, including image_url from linked User when present."""
+    payload = {
         'id': cust.id,
         'name': cust.name,
         'phone': cust.phone,
         'country_code': cust.country_code,
         'address': cust.address or '',
-    })
+    }
+    if cust.user_id:
+        user = cust.user
+        if user.image:
+            url = getattr(user.image, 'url', None) or str(user.image)
+            payload['image_url'] = _build_media_url(request, url)
+        else:
+            payload['image_url'] = None
+    return payload
+
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def customer_me(request):
+    """GET: Customer profile. PATCH: Update name, phone, country_code, address, image. Sync to User when present."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method == 'GET':
+        return Response(_customer_me_response(cust, request))
+    # PATCH: accept JSON or multipart (for image upload)
+    data = request.data if hasattr(request.data, 'get') else {}
+    if 'name' in data and data.get('name') is not None:
+        cust.name = data['name']
+    if 'phone' in data and data.get('phone') is not None:
+        cust.phone = str(data['phone']).strip()
+    if 'country_code' in data and data.get('country_code') is not None:
+        cust.country_code = str(data['country_code']).strip()
+    if 'address' in data:
+        cust.address = (data.get('address') or '').strip()
+    cust.save()
+    image_file = request.FILES.get('image') if hasattr(request, 'FILES') else None
+    if cust.user_id:
+        user = cust.user
+        if image_file:
+            user.image = image_file
+        if 'name' in data and data.get('name') is not None:
+            user.name = data['name']
+        if 'phone' in data and data.get('phone') is not None:
+            user.phone = str(data['phone']).strip()
+        if 'country_code' in data and data.get('country_code') is not None:
+            user.country_code = str(data['country_code']).strip()
+        user.save()
+    return Response(_customer_me_response(cust, request))
