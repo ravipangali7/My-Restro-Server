@@ -1125,7 +1125,9 @@ def owner_customers_list(request):
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
-    qs = Customer.objects.filter(orders__restaurant_id__in=owner_ids).distinct().annotate(
+    qs = Customer.objects.filter(orders__restaurant_id__in=owner_ids).exclude(
+        user__is_restaurant_staff=True
+    ).distinct().annotate(
         total_orders=Count('orders'),
         total_spent=Coalesce(Sum('orders__total'), Value(Decimal('0'))),
     ).order_by('-total_spent')
@@ -1157,13 +1159,17 @@ def owner_customers_stats(request):
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'total': 0, 'vip_count': 0, 'credit_due': '0'})
-    qs = Customer.objects.filter(orders__restaurant_id__in=owner_ids).distinct().annotate(
+    qs = Customer.objects.filter(orders__restaurant_id__in=owner_ids).exclude(
+        user__is_restaurant_staff=True
+    ).distinct().annotate(
         order_count=Count('orders'),
         total_spent=Coalesce(Sum('orders__total'), Value(Decimal('0'))),
     )
     total = qs.count()
     vip_count = sum(1 for c in qs if getattr(c, 'order_count', 0) >= 50)
-    credit_agg = CustomerRestaurant.objects.filter(restaurant_id__in=owner_ids).aggregate(s=Sum('to_pay'))
+    credit_agg = CustomerRestaurant.objects.filter(
+        restaurant_id__in=owner_ids
+    ).exclude(customer__user__is_restaurant_staff=True).aggregate(s=Sum('to_pay'))
     credit_due = credit_agg['s'] or Decimal('0')
     return Response({
         'total': total,
@@ -4315,7 +4321,7 @@ def public_order_create(request, slug):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuser])
 def customer_list(request):
-    qs = Customer.objects.all().order_by('-created_at')
+    qs = Customer.objects.exclude(user__is_restaurant_staff=True).order_by('-created_at')
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(
