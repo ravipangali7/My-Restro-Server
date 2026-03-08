@@ -26,12 +26,30 @@ from .models import (
 
 
 def _build_media_url(request, path):
-    if not path:
+    """Build absolute URL for a media path. Returns None on any failure to avoid 500s."""
+    try:
+        if not path:
+            return None
+        if request and getattr(request, 'build_absolute_uri', None):
+            base = request.build_absolute_uri('/').rstrip('/')
+            path_str = str(path).strip()
+            if not path_str:
+                return None
+            return f"{base}{path_str}" if path_str.startswith('/') else f"{base}/{path_str}"
+        return str(path) if path else None
+    except Exception:
         return None
-    if request and request.build_absolute_uri:
-        base = request.build_absolute_uri('/').rstrip('/')
-        return f"{base}{path}" if path.startswith('/') else f"{base}/{path}"
-    return path
+
+
+def _safe_media_url_from_field(request, file_field):
+    """Get media URL from a FileField/ImageField; returns None if missing or on error."""
+    if not file_field:
+        return None
+    try:
+        url = file_field.url if hasattr(file_field, 'url') else str(file_field)
+        return _build_media_url(request, url)
+    except Exception:
+        return None
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -177,16 +195,12 @@ class OwnerSerializer(serializers.ModelSerializer):
         return None
 
     def get_image_url(self, obj):
-        if not obj.image:
-            return None
         request = self.context.get('request')
-        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+        return _safe_media_url_from_field(request, getattr(obj, 'image', None))
 
     def get_kyc_document_url(self, obj):
-        if not obj.kyc_document:
-            return None
         request = self.context.get('request')
-        return _build_media_url(request, obj.kyc_document.url if hasattr(obj.kyc_document, 'url') else str(obj.kyc_document))
+        return _safe_media_url_from_field(request, getattr(obj, 'kyc_document', None))
 
 
 class OwnerCreateUpdateSerializer(serializers.ModelSerializer):
@@ -327,10 +341,8 @@ class RestaurantDetailSerializer(serializers.ModelSerializer):
         ]
 
     def get_logo_url(self, obj):
-        if not obj.logo:
-            return None
         request = self.context.get('request')
-        return _build_media_url(request, obj.logo.url if hasattr(obj.logo, 'url') else str(obj.logo))
+        return _safe_media_url_from_field(request, getattr(obj, 'logo', None))
 
 
 class RestaurantCreateUpdateSerializer(serializers.ModelSerializer):
@@ -949,10 +961,8 @@ class CategoryListSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'image', 'image_url', 'restaurant', 'item_count', 'created_at', 'updated_at']
 
     def get_image_url(self, obj):
-        if not obj.image:
-            return None
         request = self.context.get('request')
-        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+        return _safe_media_url_from_field(request, getattr(obj, 'image', None))
 
 
 class CategoryCreateUpdateSerializer(serializers.ModelSerializer):
@@ -1006,10 +1016,8 @@ class ProductListSerializer(serializers.ModelSerializer):
         return getattr(obj, 'raw_material_links_count', obj.raw_material_links.count())
 
     def get_image_url(self, obj):
-        if not obj.image:
-            return None
         request = self.context.get('request')
-        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+        return _safe_media_url_from_field(request, getattr(obj, 'image', None))
 
 
 class ProductDetailSerializer(serializers.ModelSerializer):
@@ -1029,10 +1037,8 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         ]
 
     def get_image_url(self, obj):
-        if not obj.image:
-            return None
         request = self.context.get('request')
-        return _build_media_url(request, obj.image.url if hasattr(obj.image, 'url') else str(obj.image))
+        return _safe_media_url_from_field(request, getattr(obj, 'image', None))
 
 
 class ProductVariantWriteSerializer(serializers.ModelSerializer):

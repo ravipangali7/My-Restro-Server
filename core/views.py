@@ -2644,6 +2644,11 @@ def combos_list(request):
                 data['products'] = []
         if not data.get('restaurant') and len(owner_ids) == 1:
             data['restaurant'] = owner_ids[0]
+        if not data.get('restaurant') and len(owner_ids) > 1:
+            return Response(
+                {'restaurant': ['Restaurant is required when you have multiple restaurants.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         serializer = ComboSetCreateUpdateSerializer(
             data=data,
             context={'request': request, 'owner_ids': owner_ids},
