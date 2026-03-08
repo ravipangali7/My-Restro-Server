@@ -230,9 +230,16 @@ def on_shareholder_withdrawal_save(sender, instance, created, **kwargs):
 
 
 def _recompute_order_total(order_id):
-    """Recompute order.total from sum of order items."""
+    """Recompute order.total from sum of order items + service_charge - discount."""
     result = OrderItem.objects.filter(order_id=order_id).aggregate(s=Sum("total"))
-    total = result.get("s") or Decimal("0")
+    items_sum = result.get("s") or Decimal("0")
+    try:
+        order = Order.objects.only("service_charge", "discount").get(pk=order_id)
+    except Order.DoesNotExist:
+        return
+    service_charge = order.service_charge or Decimal("0")
+    discount = order.discount or Decimal("0")
+    total = items_sum + service_charge - discount
     Order.objects.filter(pk=order_id).update(total=total)
 
 

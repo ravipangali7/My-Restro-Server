@@ -2048,6 +2048,7 @@ def _order_create_response(order, request):
             'quantity': str(item.quantity),
             'price': str(item.price),
             'total': str(line_total),
+            'image_url': _order_item_image_url(item, request),
         })
     return {
         'id': order.id,
@@ -2090,6 +2091,7 @@ def orders_list(request):
             return Response({'detail': 'Valid restaurant is required.'}, status=status.HTTP_400_BAD_REQUEST)
         if restaurant_id not in owner_ids:
             return Response({'detail': 'Restaurant not in your scope.'}, status=status.HTTP_403_FORBIDDEN)
+        restaurant = Restaurant.objects.filter(pk=restaurant_id).first()
         order_type = (data.get('order_type') or 'table').strip().lower()
         if order_type not in (OrderType.TABLE, OrderType.PACKING, OrderType.DELIVERY):
             order_type = OrderType.TABLE
@@ -2108,10 +2110,14 @@ def orders_list(request):
             table_id = None
         table_number = (data.get('table_number') or '').strip() or None
         address = (data.get('address') or '').strip() or None
-        try:
-            service_charge = Decimal(str(data.get('service_charge') or 0))
-        except Exception:
-            service_charge = Decimal('0')
+        sent_charge = data.get('service_charge')
+        if sent_charge is not None and sent_charge != '':
+            try:
+                service_charge = Decimal(str(sent_charge))
+            except Exception:
+                service_charge = getattr(restaurant, 'default_service_charge', None) or Decimal('0')
+        else:
+            service_charge = getattr(restaurant, 'default_service_charge', None) or Decimal('0')
         payment_method = (data.get('payment_method') or '').strip() or None
         if payment_method and payment_method not in ('cash', 'e_wallet', 'bank'):
             payment_method = None
@@ -2210,6 +2216,7 @@ def orders_list(request):
         return Response(_order_create_response(order, request), status=status.HTTP_201_CREATED)
     qs = Order.objects.filter(restaurant_id__in=owner_ids).annotate(
         items_count=Count('items'),
+        total_quantity=Coalesce(Sum('items__quantity'), Value(Decimal('0'))),
     ).select_related('table', 'waiter', 'waiter__user').order_by('-created_at')
     current_staff = _current_staff(request)
     # Kitchen sees all restaurant orders; waiter sees only their own
@@ -2246,6 +2253,8 @@ def orders_list(request):
             'status': o.status,
             'payment_status': o.payment_status,
             'items_count': getattr(o, 'items_count', 0),
+            'service_charge': str(o.service_charge) if o.service_charge is not None else None,
+            'total_quantity': str(getattr(o, 'total_quantity', 0)),
             'waiter_id': o.waiter_id,
             'waiter_name': o.waiter.user.name if o.waiter and o.waiter.user_id else '',
             'created_at': o.created_at.isoformat() if hasattr(o.created_at, 'isoformat') else str(o.created_at),
@@ -2266,6 +2275,23 @@ def _order_item_name(item):
         base = item.product_variant.product.name if p and getattr(item.product_variant, 'product', None) else f'Variant #{item.product_variant_id}'
         return base
     return 'Item'
+
+
+def _order_item_image_url(item, request):
+    """Return image URL for an OrderItem from product, variant's product, or combo_set."""
+    image_field = None
+    if item.product_id and item.product and getattr(item.product, 'image', None) and item.product.image:
+        image_field = item.product.image
+    elif item.product_variant_id and item.product_variant:
+        prod = getattr(item.product_variant, 'product', None)
+        if prod and getattr(prod, 'image', None) and prod.image:
+            image_field = prod.image
+    elif item.combo_set_id and item.combo_set and getattr(item.combo_set, 'image', None) and item.combo_set.image:
+        image_field = item.combo_set.image
+    if not image_field:
+        return None
+    url = image_field.url if hasattr(image_field, 'url') else str(image_field)
+    return _build_media_url(request, url)
 
 
 @api_view(['GET', 'PATCH'])
@@ -2312,6 +2338,7 @@ def order_detail(request, pk):
             'quantity': str(item.quantity),
             'price': str(item.price),
             'total': str(line_total),
+            'image_url': _order_item_image_url(item, request),
         })
     return Response({
         'id': order.id,
@@ -4194,6 +4221,8 @@ def public_order_create(request, slug):
             })
     if not line_items:
         return Response({'detail': 'No valid items.'}, status=status.HTTP_400_BAD_REQUEST)
+    service_charge = getattr(rest, 'default_service_charge', None) or Decimal('0')
+    order_total_with_charge = order_total + service_charge
     order = Order.objects.create(
         restaurant_id=rest.id,
         customer_id=customer.id,
@@ -4205,8 +4234,8 @@ def public_order_create(request, slug):
         payment_status='pending',
         payment_method=data.get('payment_method') or '',
         waiter_id=None,
-        total=order_total,
-        service_charge=None,
+        total=order_total_with_charge,
+        service_charge=service_charge,
     )
     for line in line_items:
         OrderItem.objects.create(
@@ -4218,6 +4247,7 @@ def public_order_create(request, slug):
             quantity=line['quantity'],
             total=line['total'],
         )
+    order.refresh_from_db()
     return Response({
         'order_id': order.id,
         'total': str(order.total),

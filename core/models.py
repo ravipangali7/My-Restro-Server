@@ -223,6 +223,11 @@ class Restaurant(models.Model):
     subscription_start = models.DateField(null=True, blank=True)
     subscription_end = models.DateField(null=True, blank=True)
     is_open = models.BooleanField(default=True)
+    default_service_charge = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal('0'),
+        null=True, blank=True,
+        help_text='Default service charge applied to every order for this restaurant.'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
