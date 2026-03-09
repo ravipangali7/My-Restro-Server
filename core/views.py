@@ -173,6 +173,47 @@ def _parse_date_range(request):
     return None, None
 
 
+def _apply_date_filter_to_queryset(qs, request, date_field='created_at'):
+    """
+    Apply date filtering from request: date_filter (today, yesterday, this_week, this_month, this_year)
+    or start_date/end_date. Returns filtered queryset.
+    """
+    date_filter_value = (request.query_params.get('date_filter') or '').strip().lower()
+    start_date = (request.query_params.get('start_date') or '').strip()[:10]
+    end_date = (request.query_params.get('end_date') or '').strip()[:10]
+    if date_filter_value:
+        today = timezone.now().date()
+        if date_filter_value == 'today':
+            start_date = end_date = today.isoformat()
+        elif date_filter_value == 'yesterday':
+            yesterday = today - timedelta(days=1)
+            start_date = end_date = yesterday.isoformat()
+        elif date_filter_value == 'this_week':
+            # Monday as start of week
+            start_d = today - timedelta(days=today.weekday())
+            start_date = start_d.isoformat()
+            end_date = today.isoformat()
+        elif date_filter_value == 'this_month':
+            start_d = today.replace(day=1)
+            start_date = start_d.isoformat()
+            end_date = today.isoformat()
+        elif date_filter_value == 'this_year':
+            start_d = today.replace(month=1, day=1)
+            start_date = start_d.isoformat()
+            end_date = today.isoformat()
+    if start_date:
+        try:
+            qs = qs.filter(**{f'{date_field}__date__gte': start_date})
+        except (TypeError, ValueError):
+            pass
+    if end_date:
+        try:
+            qs = qs.filter(**{f'{date_field}__date__lte': end_date})
+        except (TypeError, ValueError):
+            pass
+    return qs
+
+
 def _owner_queryset(request):
     qs = User.objects.filter(is_owner=True).order_by('-created_at')
     search = (request.query_params.get('search') or '').strip()
@@ -201,6 +242,7 @@ def owner_list(request):
             return Response(OwnerSerializer(user, context={'request': request}).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     qs = _owner_queryset(request)
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
     ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
     allowed = ['created_at', '-created_at', 'name', '-name', 'phone', '-phone', 'balance', '-balance']
     if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
@@ -349,6 +391,7 @@ def restaurant_list(request):
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     qs = _restaurant_queryset(request)
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
     ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
     allowed = ['created_at', '-created_at', 'name', '-name', 'slug', '-slug']
     if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
@@ -808,6 +851,11 @@ def owner_staff_list(request):
         qs = qs.filter(is_suspend=False)
     elif status_filter == 'inactive':
         qs = qs.filter(is_suspend=True)
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or 'user__name'
+    allowed = ['created_at', '-created_at', 'user__name', '-user__name', 'restaurant__name', '-restaurant__name']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     serializer = OwnerStaffListSerializer(page, many=True, context={'request': request})
@@ -1108,6 +1156,14 @@ def owner_feedback_list(request):
     if restaurant_id is None or restaurant_id not in owner_ids:
         return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
     qs = Feedback.objects.filter(restaurant_id=restaurant_id).select_related('customer', 'order').order_by('-created_at')
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(review__icontains=search) | Q(customer__name__icontains=search) | Q(customer__phone__icontains=search))
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    allowed = ['created_at', '-created_at', 'rating', '-rating']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     serializer = FeedbackListSerializer(page, many=True, context={'request': request})
@@ -1167,6 +1223,10 @@ def owner_customers_list(request):
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(Q(name__icontains=search) | Q(phone__icontains=search))
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-total_spent'
+    allowed = ['name', '-name', 'total_orders', '-total_orders', 'total_spent', '-total_spent']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     results = []
@@ -1236,6 +1296,11 @@ def owner_vendors_list(request):
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(Q(name__icontains=search) | Q(phone__icontains=search))
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or 'name'
+    allowed = ['created_at', '-created_at', 'name', '-name']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     serializer = OwnerVendorListSerializer(page, many=True, context={'request': request})
@@ -1314,8 +1379,18 @@ def units_list(request):
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     qs = Unit.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant').order_by('name')
-    serializer = UnitListSerializer(qs, many=True, context={'request': request})
-    return Response({'results': serializer.data})
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(name__icontains=search) | Q(symbol__icontains=search))
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or 'name'
+    allowed = ['created_at', '-created_at', 'name', '-name', 'symbol', '-symbol']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = UnitListSerializer(page, many=True, context={'request': request})
+    return paginator.get_paginated_response(serializer.data)
 
 
 @api_view(['GET', 'PATCH', 'PUT'])
@@ -1382,8 +1457,15 @@ def categories_list(request):
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(name__icontains=search)
-    serializer = CategoryListSerializer(qs, many=True, context={'request': request})
-    return Response({'results': serializer.data})
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or 'name'
+    allowed = ['created_at', '-created_at', 'name', '-name']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = CategoryListSerializer(page, many=True, context={'request': request})
+    return paginator.get_paginated_response(serializer.data)
 
 
 @api_view(['GET', 'PATCH', 'PUT', 'DELETE'])
@@ -1525,9 +1607,16 @@ def raw_materials_list(request):
         qs = qs.filter(min_stock__isnull=False).filter(stock__lt=F('min_stock'))
     search = (request.query_params.get('search') or '').strip()
     if search:
-        qs = qs.filter(name__icontains=search)
-    results = [_raw_material_to_dict(r, request) for r in qs]
-    return Response({'results': results})
+        qs = qs.filter(Q(name__icontains=search) | Q(vendor__name__icontains=search))
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or 'name'
+    allowed = ['created_at', '-created_at', 'name', '-name', 'stock', '-stock', 'price', '-price']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    results = [_raw_material_to_dict(r, request) for r in page]
+    return paginator.get_paginated_response(results)
 
 
 @api_view(['GET'])
@@ -1686,9 +1775,19 @@ def tables_list(request):
                 qs = qs.filter(restaurant_id=rid)
         except (TypeError, ValueError):
             pass
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(name__icontains=search) | Q(floor__icontains=search) | Q(near_by__icontains=search))
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or 'name'
+    allowed = ['created_at', '-created_at', 'name', '-name', 'floor', '-floor', 'capacity', '-capacity']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
     from .serializers import _build_media_url
     results = []
-    for t in qs:
+    for t in page:
         status_str, order_id = _table_status_and_order(t.id)
         image_url = None
         if t.image:
@@ -1704,7 +1803,7 @@ def tables_list(request):
             'current_order_id': order_id,
             'image_url': image_url,
         })
-    return Response({'results': results})
+    return paginator.get_paginated_response(results)
 
 
 @api_view(['GET'])
@@ -1916,18 +2015,24 @@ def purchases_list(request):
                 qs = qs.filter(restaurant_id=rid)
         except (TypeError, ValueError):
             pass
-    start_date = request.query_params.get('start_date', '').strip()[:10]
-    if start_date:
-        try:
-            qs = qs.filter(created_at__date__gte=start_date)
-        except (TypeError, ValueError):
-            pass
-    end_date = request.query_params.get('end_date', '').strip()[:10]
-    if end_date:
-        try:
-            qs = qs.filter(created_at__date__lte=end_date)
-        except (TypeError, ValueError):
-            pass
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        if search.isdigit():
+            try:
+                sid = int(search)
+                qs = qs.filter(Q(id=sid) | Q(vendor__name__icontains=search))
+            except ValueError:
+                qs = qs.filter(vendor__name__icontains=search)
+        else:
+            qs = qs.filter(vendor__name__icontains=search)
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    allowed = ['id', '-id', 'created_at', '-created_at', 'total', '-total', 'subtotal', '-subtotal']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
+    stats_qs = qs
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
     results = [
         {
             'id': p.id,
@@ -1941,35 +2046,16 @@ def purchases_list(request):
             'created_at': p.created_at.isoformat() if hasattr(p.created_at, 'isoformat') else str(p.created_at),
             'items_count': getattr(p, 'items_count', p.items.count()),
         }
-        for p in qs
+        for p in page
     ]
-    stats_qs = Purchase.objects.filter(restaurant_id__in=owner_ids)
-    if restaurant_id:
-        try:
-            rid = int(restaurant_id)
-            if rid in owner_ids:
-                stats_qs = stats_qs.filter(restaurant_id=rid)
-        except (TypeError, ValueError):
-            pass
-    if start_date:
-        try:
-            stats_qs = stats_qs.filter(created_at__date__gte=start_date)
-        except (TypeError, ValueError):
-            pass
-    if end_date:
-        try:
-            stats_qs = stats_qs.filter(created_at__date__lte=end_date)
-        except (TypeError, ValueError):
-            pass
     agg = stats_qs.aggregate(total_amount=Sum('total'), total_subtotal=Sum('subtotal'))
-    return Response({
-        'results': results,
-        'stats': {
-            'total_count': stats_qs.count(),
-            'total_amount': str(agg['total_amount'] or 0),
-            'total_subtotal': str(agg['total_subtotal'] or 0),
-        },
-    })
+    resp = paginator.get_paginated_response(results)
+    resp.data['stats'] = {
+        'total_count': stats_qs.count(),
+        'total_amount': str(agg['total_amount'] or 0),
+        'total_subtotal': str(agg['total_subtotal'] or 0),
+    }
+    return resp
 
 
 @api_view(['GET'])
@@ -2267,18 +2353,21 @@ def orders_list(request):
     payment_status_param = request.query_params.get('payment_status', '').strip()
     if payment_status_param:
         qs = qs.filter(payment_status=payment_status_param)
-    start_date = request.query_params.get('start_date', '').strip()[:10]
-    if start_date:
-        try:
-            qs = qs.filter(created_at__date__gte=start_date)
-        except (TypeError, ValueError):
-            pass
-    end_date = request.query_params.get('end_date', '').strip()[:10]
-    if end_date:
-        try:
-            qs = qs.filter(created_at__date__lte=end_date)
-        except (TypeError, ValueError):
-            pass
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        if search.isdigit():
+            try:
+                sid = int(search)
+                qs = qs.filter(Q(id=sid) | Q(table_number__icontains=search) | Q(waiter__user__name__icontains=search) | Q(waiter__user__phone__icontains=search))
+            except ValueError:
+                qs = qs.filter(Q(table_number__icontains=search) | Q(waiter__user__name__icontains=search) | Q(waiter__user__phone__icontains=search))
+        else:
+            qs = qs.filter(Q(table_number__icontains=search) | Q(waiter__user__name__icontains=search) | Q(waiter__user__phone__icontains=search))
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    allowed_ordering = ['id', '-id', 'created_at', '-created_at', 'total', '-total', 'status', 'table_number', '-table_number']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed_ordering]:
+        qs = qs.order_by(ordering)
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     results = [
@@ -2474,18 +2563,14 @@ def expenses_list(request):
                 qs = qs.filter(restaurant_id=rid)
         except ValueError:
             pass
-    start_date = request.query_params.get('start_date', '').strip()[:10]
-    if start_date:
-        try:
-            qs = qs.filter(created_at__date__gte=start_date)
-        except (TypeError, ValueError):
-            pass
-    end_date = request.query_params.get('end_date', '').strip()[:10]
-    if end_date:
-        try:
-            qs = qs.filter(created_at__date__lte=end_date)
-        except (TypeError, ValueError):
-            pass
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(name__icontains=search) | Q(description__icontains=search) | Q(vendor__name__icontains=search))
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    allowed = ['created_at', '-created_at', 'name', '-name', 'amount', '-amount']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     serializer = ExpenseListSerializer(page, many=True, context={'request': request})
@@ -2611,8 +2696,15 @@ def products_list(request):
         qs = qs.filter(
             Q(name__icontains=search) | Q(category__name__icontains=search)
         )
-    serializer = ProductListSerializer(qs, many=True, context={'request': request})
-    return Response({'results': serializer.data})
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or 'name'
+    allowed = ['created_at', '-created_at', 'name', '-name']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = ProductListSerializer(page, many=True, context={'request': request})
+    return paginator.get_paginated_response(serializer.data)
 
 
 @api_view(['GET', 'PATCH', 'PUT', 'DELETE'])
@@ -2733,8 +2825,18 @@ def combos_list(request):
     qs = ComboSet.objects.filter(restaurant_id__in=owner_ids).annotate(
         products_count=Count('products', distinct=True),
     ).prefetch_related('products').select_related('restaurant').order_by('name')
-    serializer = ComboSetListSerializer(qs, many=True, context={'request': request})
-    return Response({'results': serializer.data})
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(name__icontains=search) | Q(description__icontains=search))
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or 'name'
+    allowed = ['created_at', '-created_at', 'name', '-name', 'price', '-price']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = ComboSetListSerializer(page, many=True, context={'request': request})
+    return paginator.get_paginated_response(serializer.data)
 
 
 @api_view(['GET', 'PATCH', 'PUT', 'DELETE'])
@@ -2816,18 +2918,11 @@ def owner_paid_records_list(request):
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(Q(name__icontains=search))
-    date_from = request.query_params.get('date_from') or request.query_params.get('start_date')
-    date_to = request.query_params.get('date_to') or request.query_params.get('end_date')
-    if date_from:
-        try:
-            qs = qs.filter(created_at__date__gte=date_from[:10])
-        except (TypeError, ValueError):
-            pass
-    if date_to:
-        try:
-            qs = qs.filter(created_at__date__lte=date_to[:10])
-        except (TypeError, ValueError):
-            pass
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    allowed = ['created_at', '-created_at', 'amount', '-amount', 'name', '-name']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     results = [
@@ -2887,18 +2982,11 @@ def owner_received_records_list(request):
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(Q(name__icontains=search) | Q(remarks__icontains=search))
-    date_from = request.query_params.get('date_from') or request.query_params.get('start_date')
-    date_to = request.query_params.get('date_to') or request.query_params.get('end_date')
-    if date_from:
-        try:
-            qs = qs.filter(created_at__date__gte=date_from[:10])
-        except (TypeError, ValueError):
-            pass
-    if date_to:
-        try:
-            qs = qs.filter(created_at__date__lte=date_to[:10])
-        except (TypeError, ValueError):
-            pass
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    allowed = ['created_at', '-created_at', 'amount', '-amount', 'name', '-name']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     results = []
@@ -3740,6 +3828,7 @@ def transaction_stats(request):
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def transaction_list(request):
     qs = _transaction_queryset(request)
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
     ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
     allowed = ['created_at', '-created_at', 'amount', '-amount']
     if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
@@ -4424,6 +4513,10 @@ def customer_restaurants_list(request):
     if not cust:
         return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
     qs = Restaurant.objects.all().order_by('name')
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(name__icontains=search) | Q(slug__icontains=search) | Q(address__icontains=search))
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
     ordering = (request.query_params.get('ordering') or 'name').strip()
     if ordering.lstrip('-') in ('name', 'created_at', 'slug'):
         qs = qs.order_by(ordering)
@@ -4660,18 +4753,20 @@ def customer_orders_list(request):
             qs = qs.filter(restaurant_id=int(restaurant_id))
         except (TypeError, ValueError):
             pass
-    start_date = request.query_params.get('start_date', '').strip()[:10]
-    if start_date:
-        try:
-            qs = qs.filter(created_at__date__gte=start_date)
-        except (TypeError, ValueError):
-            pass
-    end_date = request.query_params.get('end_date', '').strip()[:10]
-    if end_date:
-        try:
-            qs = qs.filter(created_at__date__lte=end_date)
-        except (TypeError, ValueError):
-            pass
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        if search.isdigit():
+            try:
+                qs = qs.filter(Q(id=int(search)) | Q(restaurant__name__icontains=search) | Q(table_number__icontains=search))
+            except ValueError:
+                qs = qs.filter(Q(restaurant__name__icontains=search) | Q(table_number__icontains=search))
+        else:
+            qs = qs.filter(Q(restaurant__name__icontains=search) | Q(table_number__icontains=search))
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    allowed = ['id', '-id', 'created_at', '-created_at', 'total', '-total', 'status']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
     # Stats for this customer
     stats_qs = Order.objects.filter(customer=cust)
     total_orders = stats_qs.count()
@@ -4755,18 +4850,13 @@ def customer_transactions_list(request):
     qs = ReceivedRecord.objects.filter(customer=cust).select_related(
         'restaurant', 'order'
     ).order_by('-created_at')
-    start_date = request.query_params.get('start_date', '').strip()[:10]
-    if start_date:
-        try:
-            qs = qs.filter(created_at__date__gte=start_date)
-        except (TypeError, ValueError):
-            pass
-    end_date = request.query_params.get('end_date', '').strip()[:10]
-    if end_date:
-        try:
-            qs = qs.filter(created_at__date__lte=end_date)
-        except (TypeError, ValueError):
-            pass
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(name__icontains=search) | Q(remarks__icontains=search))
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    if ordering.lstrip('-') in ('created_at', 'amount', 'name'):
+        qs = qs.order_by(ordering)
     total_amount = qs.aggregate(s=Sum('amount'))['s'] or Decimal('0')
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
@@ -4975,6 +5065,13 @@ def customer_feedback_list(request):
         )
         return Response({'detail': 'Feedback submitted.'}, status=status.HTTP_201_CREATED)
     qs = Feedback.objects.filter(customer=cust).select_related('restaurant', 'order').order_by('-created_at')
+    search = (request.query_params.get('search') or '').strip()
+    if search:
+        qs = qs.filter(Q(review__icontains=search) | Q(restaurant__name__icontains=search))
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    if ordering.lstrip('-') in ('created_at', 'rating'):
+        qs = qs.order_by(ordering)
     from django.db.models import Avg
     avg_rating = qs.aggregate(a=Avg('rating'))['a']
     total = qs.count()
