@@ -47,7 +47,7 @@ from .models import (
     Feedback,
     Expenses,
 )
-from .models import PaymentStatus, DiscountType, OrderType
+from .models import PaymentStatus, DiscountType, OrderType, OrderStatus, StockLog, StockLogType
 from .permissions import IsSuperuser, IsSuperuserOrOwner
 from .serializers import (
     _build_media_url,
@@ -3414,6 +3414,563 @@ def owner_report_pl(request):
         'net_profit': str(net_profit),
         'breakdown': breakdown,
         'monthly': monthly,
+    })
+
+
+def _require_owner_analytics(request):
+    """Owner-only analytics: return (owner_ids, None) or (None, 403 Response)."""
+    if not getattr(request.user, 'is_owner', False):
+        return None, Response({'detail': 'Only owners can access analytics.'}, status=status.HTTP_403_FORBIDDEN)
+    owner_ids = _owner_restaurant_ids(request)
+    if not owner_ids:
+        return [], None
+    return owner_ids, None
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_analytics_overview(request):
+    """Owner-only. Global cards: restaurant stats, staff summary, orders overview, sales overview, payroll & staff cost."""
+    owner_ids, err = _require_owner_analytics(request)
+    if err is not None:
+        return err
+    start_dt, end_dt = _parse_date_range(request)
+    if start_dt is None or end_dt is None:
+        now = timezone.now()
+        start_dt = now - timedelta(days=30)
+        end_dt = now
+    start_date, end_date = start_dt.date(), end_dt.date()
+
+    # Restaurant stats
+    qs_rest = Restaurant.objects.filter(id__in=owner_ids)
+    total_restaurants = qs_rest.count()
+    open_restaurants = qs_rest.filter(is_open=True).count()
+    closed_restaurants = total_restaurants - open_restaurants
+
+    # Staff summary
+    staff_qs = Staff.objects.filter(restaurant_id__in=owner_ids)
+    total_staff = staff_qs.count()
+    total_managers = staff_qs.filter(is_manager=True).count()
+    total_waiters = staff_qs.filter(is_waiter=True).count()
+    total_kitchen = staff_qs.filter(is_kitchen=True).count()
+    suspended_staff = staff_qs.filter(is_suspend=True).count()
+    avg_staff_per_restaurant = round(total_staff / total_restaurants, 1) if total_restaurants else 0
+
+    # Orders overview (in date range)
+    order_qs = Order.objects.filter(restaurant_id__in=owner_ids, created_at__date__gte=start_date, created_at__date__lte=end_date)
+    total_orders = order_qs.count()
+    pending_orders = order_qs.filter(status=OrderStatus.PENDING).count()
+    accepted_orders = order_qs.filter(status=OrderStatus.ACCEPTED).count()
+    running_orders = order_qs.filter(status=OrderStatus.RUNNING).count()
+    ready_orders = order_qs.filter(status=OrderStatus.READY).count()
+    served_orders = order_qs.filter(status=OrderStatus.SERVED).count()
+    rejected_orders = order_qs.filter(status=OrderStatus.REJECTED).count()
+
+    # Sales overview
+    order_agg = Order.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).aggregate(
+        total_revenue=Sum('total'),
+        total_service_charge=Coalesce(Sum('service_charge'), Decimal('0')),
+        total_discount=Coalesce(Sum('discount'), Decimal('0')),
+    )
+    total_revenue = order_agg['total_revenue'] or Decimal('0')
+    total_service_charges = order_agg['total_service_charge'] or Decimal('0')
+    total_discounts = order_agg['total_discount'] or Decimal('0')
+    net_revenue = total_revenue - total_discounts
+
+    # Payroll: staff salary cost (per_day_salary * present days in range) per restaurant, summed
+    staff_with_days = Staff.objects.filter(restaurant_id__in=owner_ids).annotate(
+        attendance_days=Count(
+            'attendances',
+            filter=Q(
+                attendances__date__gte=start_date,
+                attendances__date__lte=end_date,
+                attendances__status=AttendanceStatus.PRESENT,
+            ),
+        ),
+    )
+    total_payroll = Decimal('0')
+    for s in staff_with_days:
+        per_day = s.per_day_salary or Decimal('0')
+        total_payroll += per_day * (s.attendance_days or 0)
+    avg_staff_salary = round(float(total_payroll / total_staff), 2) if total_staff else 0
+    payroll_vs_revenue = round(float(total_payroll / total_revenue * 100), 1) if total_revenue else 0
+
+    return Response({
+        'restaurant_stats': {
+            'total_restaurants': total_restaurants,
+            'open_restaurants': open_restaurants,
+            'closed_restaurants': closed_restaurants,
+        },
+        'staff_summary': {
+            'total_staff': total_staff,
+            'total_managers': total_managers,
+            'total_waiters': total_waiters,
+            'total_kitchen': total_kitchen,
+            'suspended_staff': suspended_staff,
+            'avg_staff_per_restaurant': avg_staff_per_restaurant,
+        },
+        'orders_overview': {
+            'total_orders': total_orders,
+            'pending_orders': pending_orders,
+            'accepted_orders': accepted_orders,
+            'running_orders': running_orders,
+            'ready_orders': ready_orders,
+            'served_orders': served_orders,
+            'rejected_orders': rejected_orders,
+        },
+        'sales_overview': {
+            'total_revenue': str(total_revenue),
+            'total_service_charges': str(total_service_charges),
+            'total_discounts': str(total_discounts),
+            'net_revenue': str(net_revenue),
+        },
+        'payroll_overview': {
+            'total_payroll': str(total_payroll),
+            'avg_staff_salary': avg_staff_salary,
+            'payroll_vs_revenue_ratio': payroll_vs_revenue,
+        },
+        'restaurants': list(Restaurant.objects.filter(id__in=owner_ids).values('id', 'name', 'slug', 'logo', 'is_open')),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_analytics_comparison(request):
+    """Owner-only. Comparison data: performance table, top restaurants, order/revenue series, finance, vendors, inventory, etc."""
+    owner_ids, err = _require_owner_analytics(request)
+    if err is not None:
+        return err
+    start_dt, end_dt = _parse_date_range(request)
+    if start_dt is None or end_dt is None:
+        now = timezone.now()
+        start_dt = now - timedelta(days=30)
+        end_dt = now
+    start_date, end_date = start_dt.date(), end_dt.date()
+
+    restaurants = list(Restaurant.objects.filter(id__in=owner_ids).order_by('name').values('id', 'name', 'slug'))
+    rest_map = {r['id']: r for r in restaurants}
+
+    # Orders per restaurant (in range)
+    orders_per_rest = dict(Order.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).values('restaurant_id').annotate(count=Count('id')).values_list('restaurant_id', 'count'))
+
+    # Revenue per restaurant
+    revenue_per_rest = dict(Order.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).values('restaurant_id').annotate(s=Sum('total')).values_list('restaurant_id', 's'))
+    for rid in owner_ids:
+        if rid not in revenue_per_rest:
+            revenue_per_rest[rid] = Decimal('0')
+        elif revenue_per_rest[rid] is None:
+            revenue_per_rest[rid] = Decimal('0')
+
+    # Staff count per restaurant
+    staff_per_rest = dict(Staff.objects.filter(restaurant_id__in=owner_ids).values('restaurant_id').annotate(c=Count('id')).values_list('restaurant_id', 'c'))
+
+    # Vendors count per restaurant
+    vendor_per_rest = dict(Vendor.objects.filter(restaurant_id__in=owner_ids).values('restaurant_id').annotate(c=Count('id')).values_list('restaurant_id', 'c'))
+
+    # Expenses total per restaurant (in range)
+    expenses_per_rest = dict(Expenses.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).values('restaurant_id').annotate(s=Sum('amount')).values_list('restaurant_id', 's'))
+    for rid in owner_ids:
+        if rid not in expenses_per_rest or expenses_per_rest[rid] is None:
+            expenses_per_rest[rid] = Decimal('0')
+
+    # Purchases total per restaurant (in range)
+    purchase_per_rest = dict(Purchase.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).values('restaurant_id').annotate(s=Sum('total')).values_list('restaurant_id', 's'))
+    for rid in owner_ids:
+        if rid not in purchase_per_rest or purchase_per_rest[rid] is None:
+            purchase_per_rest[rid] = Decimal('0')
+
+    # CustomerRestaurant count per restaurant
+    cr_per_rest = dict(CustomerRestaurant.objects.filter(restaurant_id__in=owner_ids).values('restaurant_id').annotate(c=Count('id')).values_list('restaurant_id', 'c'))
+
+    # Payroll per restaurant (per_day * present days in range)
+    staff_with_days = Staff.objects.filter(restaurant_id__in=owner_ids).annotate(
+        attendance_days=Count(
+            'attendances',
+            filter=Q(
+                attendances__date__gte=start_date,
+                attendances__date__lte=end_date,
+                attendances__status=AttendanceStatus.PRESENT,
+            ),
+        ),
+    )
+    payroll_per_rest = {}
+    for s in staff_with_days:
+        per_day = s.per_day_salary or Decimal('0')
+        payroll_per_rest[s.restaurant_id] = payroll_per_rest.get(s.restaurant_id, Decimal('0')) + per_day * (s.attendance_days or 0)
+    for rid in owner_ids:
+        payroll_per_rest.setdefault(rid, Decimal('0'))
+
+    # Performance table
+    performance_table = []
+    for r in restaurants:
+        rid = r['id']
+        rev = revenue_per_rest.get(rid, Decimal('0')) or Decimal('0')
+        exp = expenses_per_rest.get(rid, Decimal('0')) or Decimal('0')
+        payroll = payroll_per_rest.get(rid, Decimal('0')) or Decimal('0')
+        purch = purchase_per_rest.get(rid, Decimal('0')) or Decimal('0')
+        profit = rev - exp - payroll - purch
+        performance_table.append({
+            'restaurant_id': rid,
+            'restaurant_name': r['name'],
+            'orders': orders_per_rest.get(rid, 0),
+            'revenue': str(rev),
+            'staff': staff_per_rest.get(rid, 0),
+            'vendors': vendor_per_rest.get(rid, 0),
+            'expenses': str(exp),
+            'purchases': str(purch),
+            'customers': cr_per_rest.get(rid, 0),
+            'payroll': str(payroll),
+            'profit': str(profit),
+        })
+
+    # Top restaurants
+    by_orders = sorted(performance_table, key=lambda x: x['orders'], reverse=True)[:5]
+    by_revenue = sorted(performance_table, key=lambda x: float(x['revenue']), reverse=True)[:5]
+    by_customers = sorted(performance_table, key=lambda x: x['customers'], reverse=True)[:5]
+    by_profit = sorted(performance_table, key=lambda x: float(x['profit']), reverse=True)[:5]
+
+    # Bar series: orders per restaurant, revenue per restaurant
+    orders_bar = [{'restaurant_name': rest_map.get(rid, {}).get('name', ''), 'orders': orders_per_rest.get(rid, 0), 'revenue': str(revenue_per_rest.get(rid, Decimal('0')))}
+                  for rid in owner_ids]
+    # Order type distribution (global in range)
+    order_type_dist = list(Order.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).values('order_type').annotate(count=Count('id')))
+    order_type_table = {ot['order_type']: ot['count'] for ot in order_type_dist}
+    order_type_distribution = {
+        'table': order_type_table.get(OrderType.TABLE, 0),
+        'packing': order_type_table.get(OrderType.PACKING, 0),
+        'delivery': order_type_table.get(OrderType.DELIVERY, 0),
+    }
+
+    # Finance: PaidRecord, ReceivedRecord, Transaction per restaurant (in range)
+    paid_per_rest = dict(PaidRecord.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).values('restaurant_id').annotate(s=Sum('amount')).values_list('restaurant_id', 's'))
+    received_per_rest = dict(ReceivedRecord.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).values('restaurant_id').annotate(s=Sum('amount')).values_list('restaurant_id', 's'))
+    txn_count_per_rest = dict(Transaction.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).values('restaurant_id').annotate(c=Count('id')).values_list('restaurant_id', 'c'))
+    finance_comparison = []
+    for r in restaurants:
+        rid = r['id']
+        finance_comparison.append({
+            'restaurant_id': rid,
+            'restaurant_name': r['name'],
+            'paid_amount': str(paid_per_rest.get(rid) or Decimal('0')),
+            'received_amount': str(received_per_rest.get(rid) or Decimal('0')),
+            'transactions': txn_count_per_rest.get(rid, 0),
+        })
+
+    # Vendor: total vendors, payables, receivables per restaurant
+    vendor_payables = dict(Vendor.objects.filter(restaurant_id__in=owner_ids).values('restaurant_id').annotate(s=Sum('to_pay')).values_list('restaurant_id', 's'))
+    vendor_receivables = dict(Vendor.objects.filter(restaurant_id__in=owner_ids).values('restaurant_id').annotate(s=Sum('to_receive')).values_list('restaurant_id', 's'))
+    vendor_analytics = [{
+        'restaurant_id': r['id'],
+        'restaurant_name': r['name'],
+        'total_vendors': vendor_per_rest.get(r['id'], 0),
+        'payables': str(vendor_payables.get(r['id']) or Decimal('0')),
+        'receivables': str(vendor_receivables.get(r['id']) or Decimal('0')),
+    } for r in restaurants]
+
+    # Inventory: raw materials count, stock in/out per restaurant (in range)
+    raw_per_rest = dict(RawMaterial.objects.filter(restaurant_id__in=owner_ids).values('restaurant_id').annotate(c=Count('id')).values_list('restaurant_id', 'c'))
+    stock_in_per_rest = dict(StockLog.objects.filter(
+        restaurant_id__in=owner_ids,
+        type=StockLogType.IN,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).values('restaurant_id').annotate(s=Sum('quantity')).values_list('restaurant_id', 's'))
+    stock_out_per_rest = dict(StockLog.objects.filter(
+        restaurant_id__in=owner_ids,
+        type=StockLogType.OUT,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).values('restaurant_id').annotate(s=Sum('quantity')).values_list('restaurant_id', 's'))
+    inventory_comparison = [{
+        'restaurant_id': r['id'],
+        'restaurant_name': r['name'],
+        'raw_materials': raw_per_rest.get(r['id'], 0),
+        'stock_in': str(stock_in_per_rest.get(r['id']) or Decimal('0')),
+        'stock_out': str(stock_out_per_rest.get(r['id']) or Decimal('0')),
+    } for r in restaurants]
+
+    # Purchases comparison (total purchases, amount per restaurant - already have purchase_per_rest)
+    total_purchases_amount = sum(purchase_per_rest.get(rid, Decimal('0')) or Decimal('0') for rid in owner_ids)
+    purchases_comparison = [{'restaurant_id': r['id'], 'restaurant_name': r['name'], 'purchase_amount': str(purchase_per_rest.get(r['id'], Decimal('0')) or Decimal('0'))} for r in restaurants]
+
+    # Expenses comparison + monthly trend
+    expenses_comparison = [{'restaurant_id': r['id'], 'restaurant_name': r['name'], 'total_expenses': str(expenses_per_rest.get(r['id'], Decimal('0')) or Decimal('0'))} for r in restaurants]
+    expenses_monthly = list(Expenses.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).annotate(month_key=TruncMonth('created_at')).values('month_key').annotate(amount=Sum('amount')).order_by('month_key'))
+    expenses_monthly_trend = [{'month': (m['month_key'].strftime('%Y-%m') if hasattr(m['month_key'], 'strftime') else str(m['month_key'])[:7]), 'amount': str(m['amount'] or 0)} for m in expenses_monthly]
+
+    # Customer comparison: customers, to_pay, to_receive
+    cr_agg = CustomerRestaurant.objects.filter(restaurant_id__in=owner_ids).values('restaurant_id').annotate(
+        to_pay_sum=Sum('to_pay'),
+        to_receive_sum=Sum('to_receive'),
+        count=Count('id'),
+    )
+    cr_agg_map = {x['restaurant_id']: x for x in cr_agg}
+    customer_comparison = [{
+        'restaurant_id': r['id'],
+        'restaurant_name': r['name'],
+        'customers': cr_agg_map.get(r['id'], {}).get('count', 0),
+        'to_pay': str(cr_agg_map.get(r['id'], {}).get('to_pay_sum') or Decimal('0')),
+        'to_receive': str(cr_agg_map.get(r['id'], {}).get('to_receive_sum') or Decimal('0')),
+    } for r in restaurants]
+
+    # Attendance comparison: present, absent, leave per restaurant (in range)
+    att_present = dict(Attendance.objects.filter(
+        restaurant_id__in=owner_ids,
+        date__gte=start_date,
+        date__lte=end_date,
+        status=AttendanceStatus.PRESENT,
+    ).values('restaurant_id').annotate(c=Count('id')).values_list('restaurant_id', 'c'))
+    att_absent = dict(Attendance.objects.filter(
+        restaurant_id__in=owner_ids,
+        date__gte=start_date,
+        date__lte=end_date,
+        status=AttendanceStatus.ABSENT,
+    ).values('restaurant_id').annotate(c=Count('id')).values_list('restaurant_id', 'c'))
+    att_leave = dict(Attendance.objects.filter(
+        restaurant_id__in=owner_ids,
+        date__gte=start_date,
+        date__lte=end_date,
+        status=AttendanceStatus.LEAVE,
+    ).values('restaurant_id').annotate(c=Count('id')).values_list('restaurant_id', 'c'))
+    attendance_comparison = [{
+        'restaurant_id': r['id'],
+        'restaurant_name': r['name'],
+        'present': att_present.get(r['id'], 0),
+        'absent': att_absent.get(r['id'], 0),
+        'leave': att_leave.get(r['id'], 0),
+    } for r in restaurants]
+
+    # Payroll analytics: total salary per restaurant (already have payroll_per_rest), ratio, top 5 staff
+    payroll_analytics = []
+    for r in restaurants:
+        rid = r['id']
+        rev = revenue_per_rest.get(rid) or Decimal('0')
+        payroll_analytics.append({
+            'restaurant_id': rid,
+            'restaurant_name': r['name'],
+            'total_salary': str(payroll_per_rest.get(rid, Decimal('0')) or Decimal('0')),
+            'payroll_vs_revenue': round(float((payroll_per_rest.get(rid) or Decimal('0')) / (rev if rev else Decimal('1')) * 100), 1),
+        })
+    # Top 5 highest-paid staff (by salary: per_day_salary * days in period) across all restaurants
+    staff_salary_list = []
+    for s in staff_with_days:
+        per_day = s.per_day_salary or Decimal('0')
+        salary = per_day * (s.attendance_days or 0)
+        staff_salary_list.append({'staff_id': s.id, 'staff_name': getattr(s.user, 'name', None) or '', 'restaurant_name': s.restaurant.name if s.restaurant_id else '', 'salary': float(salary)})
+    top5_staff = sorted(staff_salary_list, key=lambda x: x['salary'], reverse=True)[:5]
+
+    # Inventory alerts: low stock (stock <= min_stock), high consumption (stock out in period)
+    low_stock = list(RawMaterial.objects.filter(
+        restaurant_id__in=owner_ids,
+    ).filter(stock__lte=F('min_stock')).exclude(min_stock__isnull=True).values('id', 'name', 'restaurant_id', 'stock', 'min_stock', 'unit'))
+    for i in low_stock:
+        i['stock'] = str(i['stock'])
+        i['min_stock'] = str(i.get('min_stock') or '0')
+    high_consumption_qs = StockLog.objects.filter(
+        restaurant_id__in=owner_ids,
+        type=StockLogType.OUT,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).values('raw_material_id', 'restaurant_id').annotate(total_out=Sum('quantity')).order_by('-total_out')[:10]
+    high_consumption = [{'raw_material_id': x['raw_material_id'], 'restaurant_id': x['restaurant_id'], 'total_out': str(x['total_out'] or 0)} for x in high_consumption_qs]
+
+    return Response({
+        'performance_table': performance_table,
+        'top_by_orders': by_orders,
+        'top_by_revenue': by_revenue,
+        'top_by_customers': by_customers,
+        'top_by_profit': by_profit,
+        'orders_bar': orders_bar,
+        'order_type_distribution': order_type_distribution,
+        'finance_comparison': finance_comparison,
+        'vendor_analytics': vendor_analytics,
+        'inventory_comparison': inventory_comparison,
+        'total_purchases': str(total_purchases_amount),
+        'purchases_comparison': purchases_comparison,
+        'expenses_comparison': expenses_comparison,
+        'expenses_monthly_trend': expenses_monthly_trend,
+        'customer_comparison': customer_comparison,
+        'attendance_comparison': attendance_comparison,
+        'payroll_analytics': payroll_analytics,
+        'top5_highest_paid_staff': top5_staff,
+        'inventory_alerts': {'low_stock': low_stock, 'high_consumption': high_consumption},
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_analytics_restaurant(request, restaurant_id):
+    """Owner-only. Deep analytics for one restaurant. Exclude balance; include chart series."""
+    owner_ids, err = _require_owner_analytics(request)
+    if err is not None:
+        return err
+    if restaurant_id not in owner_ids:
+        return Response({'detail': 'Restaurant not found or access denied.'}, status=status.HTTP_404_NOT_FOUND)
+    start_dt, end_dt = _parse_date_range(request)
+    if start_dt is None or end_dt is None:
+        now = timezone.now()
+        start_dt = now - timedelta(days=30)
+        end_dt = now
+    start_date, end_date = start_dt.date(), end_dt.date()
+
+    rest = Restaurant.objects.filter(id=restaurant_id).first()
+    if not rest:
+        return Response({'detail': 'Restaurant not found.'}, status=status.HTTP_404_NOT_FOUND)
+    logo_url = _build_media_url(request, rest.logo.url) if rest.logo and hasattr(rest.logo, 'url') else None
+    overview = {
+        'id': rest.id,
+        'name': rest.name,
+        'phone': rest.phone or '',
+        'slug': rest.slug,
+        'address': rest.address or '',
+        'latitude': str(rest.latitude) if rest.latitude is not None else None,
+        'longitude': str(rest.longitude) if rest.longitude is not None else None,
+        'logo_url': logo_url,
+        'subscription_start': rest.subscription_start.isoformat() if rest.subscription_start else None,
+        'subscription_end': rest.subscription_end.isoformat() if rest.subscription_end else None,
+        'due_balance': str(rest.due_balance),
+    }
+
+    # Staff
+    staff_list = list(Staff.objects.filter(restaurant_id=restaurant_id).select_related('user', 'restaurant').values('id', 'user__name', 'is_manager', 'is_waiter', 'is_kitchen', 'salary', 'per_day_salary', 'is_suspend'))
+    staff_analytics = [{'id': s['id'], 'name': s['user__name'] or '', 'is_manager': s['is_manager'], 'is_waiter': s['is_waiter'], 'is_kitchen': s['is_kitchen'], 'salary': str(s['salary'] or '0'), 'per_day_salary': str(s['per_day_salary'] or '0'), 'is_suspend': s['is_suspend']} for s in staff_list]
+
+    # Orders (in range)
+    order_agg = Order.objects.filter(restaurant_id=restaurant_id, created_at__date__gte=start_date, created_at__date__lte=end_date).aggregate(
+        total=Count('id'),
+        total_revenue=Sum('total'),
+        service_charge=Coalesce(Sum('service_charge'), Decimal('0')),
+        discount=Coalesce(Sum('discount'), Decimal('0')),
+    )
+    by_status = dict(Order.objects.filter(restaurant_id=restaurant_id, created_at__date__gte=start_date, created_at__date__lte=end_date).values('status').annotate(c=Count('id')).values_list('status', 'c'))
+    orders_analytics = {
+        'total_orders': order_agg['total'] or 0,
+        'total_revenue': str(order_agg['total_revenue'] or Decimal('0')),
+        'service_charge': str(order_agg['service_charge'] or Decimal('0')),
+        'discount': str(order_agg['discount'] or Decimal('0')),
+        'net_revenue': str((order_agg['total_revenue'] or Decimal('0')) - (order_agg['discount'] or Decimal('0'))),
+        'by_status': by_status,
+    }
+
+    # Sales (same as order revenue in range)
+    sales_analytics = {'total_revenue': str(order_agg['total_revenue'] or Decimal('0')), 'total_discounts': str(order_agg['discount'] or Decimal('0')), 'net_revenue': str((order_agg['total_revenue'] or Decimal('0')) - (order_agg['discount'] or Decimal('0')))}
+
+    # Finance: paid, received, transactions
+    paid_total = PaidRecord.objects.filter(restaurant_id=restaurant_id, created_at__date__gte=start_date, created_at__date__lte=end_date).aggregate(s=Sum('amount'))['s'] or Decimal('0')
+    received_total = ReceivedRecord.objects.filter(restaurant_id=restaurant_id, created_at__date__gte=start_date, created_at__date__lte=end_date).aggregate(s=Sum('amount'))['s'] or Decimal('0')
+    txn_count = Transaction.objects.filter(restaurant_id=restaurant_id, created_at__date__gte=start_date, created_at__date__lte=end_date).count()
+    finance_analytics = {'paid_amount': str(paid_total), 'received_amount': str(received_total), 'transactions': txn_count}
+
+    # Inventory: raw materials count, stock in/out
+    raw_count = RawMaterial.objects.filter(restaurant_id=restaurant_id).count()
+    stock_in = StockLog.objects.filter(restaurant_id=restaurant_id, type=StockLogType.IN, created_at__date__gte=start_date, created_at__date__lte=end_date).aggregate(s=Sum('quantity'))['s'] or Decimal('0')
+    stock_out = StockLog.objects.filter(restaurant_id=restaurant_id, type=StockLogType.OUT, created_at__date__gte=start_date, created_at__date__lte=end_date).aggregate(s=Sum('quantity'))['s'] or Decimal('0')
+    inventory_analytics = {'raw_materials': raw_count, 'stock_in': str(stock_in), 'stock_out': str(stock_out)}
+
+    # Vendors
+    vendor_count = Vendor.objects.filter(restaurant_id=restaurant_id).count()
+    vendor_pay = Vendor.objects.filter(restaurant_id=restaurant_id).aggregate(s=Sum('to_pay'))['s'] or Decimal('0')
+    vendor_recv = Vendor.objects.filter(restaurant_id=restaurant_id).aggregate(s=Sum('to_receive'))['s'] or Decimal('0')
+    vendor_analytics = {'total_vendors': vendor_count, 'payables': str(vendor_pay), 'receivables': str(vendor_recv)}
+
+    # Customers
+    cr_agg = CustomerRestaurant.objects.filter(restaurant_id=restaurant_id).aggregate(count=Count('id'), to_pay=Sum('to_pay'), to_receive=Sum('to_receive'))
+    customer_analytics = {'customers': cr_agg['count'] or 0, 'to_pay': str(cr_agg['to_pay'] or Decimal('0')), 'to_receive': str(cr_agg['to_receive'] or Decimal('0'))}
+
+    # Attendance (in range)
+    att = Attendance.objects.filter(restaurant_id=restaurant_id, date__gte=start_date, date__lte=end_date).values('status').annotate(c=Count('id')).values_list('status', 'c')
+    att_map = dict(att)
+    attendance_analytics = {'present': att_map.get(AttendanceStatus.PRESENT, 0), 'absent': att_map.get(AttendanceStatus.ABSENT, 0), 'leave': att_map.get(AttendanceStatus.LEAVE, 0)}
+
+    # Payroll (in range)
+    staff_payroll = Staff.objects.filter(restaurant_id=restaurant_id).annotate(
+        attendance_days=Count('attendances', filter=Q(attendances__date__gte=start_date, attendances__date__lte=end_date, attendances__status=AttendanceStatus.PRESENT)),
+    )
+    total_payroll_rest = Decimal('0')
+    for s in staff_payroll:
+        total_payroll_rest += (s.per_day_salary or Decimal('0')) * (getattr(s, 'attendance_days', 0) or 0)
+    payroll_analytics = {'total_salary': str(total_payroll_rest), 'payroll_vs_revenue': round(float(total_payroll_rest / (order_agg['total_revenue'] or Decimal('1')) * 100), 1)}
+
+    # Chart series: orders daily/weekly/monthly, revenue growth, expense trend, stock in/out, customer growth, payroll trend
+    orders_daily = list(Order.objects.filter(restaurant_id=restaurant_id, created_at__date__gte=start_date, created_at__date__lte=end_date).annotate(day=TruncDate('created_at')).values('day').annotate(count=Count('id')).order_by('day'))
+    orders_daily_series = [{'date': (x['day'].isoformat() if hasattr(x['day'], 'isoformat') else str(x['day'])[:10]), 'orders': x['count']} for x in orders_daily]
+    revenue_by_day = list(Order.objects.filter(restaurant_id=restaurant_id, created_at__date__gte=start_date, created_at__date__lte=end_date).annotate(day=TruncDate('created_at')).values('day').annotate(amount=Sum('total')).order_by('day'))
+    revenue_series = [{'date': (x['day'].isoformat() if hasattr(x['day'], 'isoformat') else str(x['day'])[:10]), 'revenue': str(x['amount'] or 0)} for x in revenue_by_day]
+    expenses_by_month = list(Expenses.objects.filter(restaurant_id=restaurant_id, created_at__date__gte=start_date, created_at__date__lte=end_date).annotate(month_key=TruncMonth('created_at')).values('month_key').annotate(amount=Sum('amount')).order_by('month_key'))
+    expense_trend = [{'month': (m['month_key'].strftime('%Y-%m') if hasattr(m['month_key'], 'strftime') else str(m['month_key'])[:7]), 'amount': str(m['amount'] or 0)} for m in expenses_by_month]
+    stock_in_by_day = list(StockLog.objects.filter(restaurant_id=restaurant_id, type=StockLogType.IN, created_at__date__gte=start_date, created_at__date__lte=end_date).annotate(day=TruncDate('created_at')).values('day').annotate(qty=Sum('quantity')).order_by('day'))
+    stock_out_by_day = list(StockLog.objects.filter(restaurant_id=restaurant_id, type=StockLogType.OUT, created_at__date__gte=start_date, created_at__date__lte=end_date).annotate(day=TruncDate('created_at')).values('day').annotate(qty=Sum('quantity')).order_by('day'))
+    stock_series = [{'date': (x['day'].isoformat() if hasattr(x['day'], 'isoformat') else str(x['day'])[:10]), 'stock_in': float(x['qty'] or 0), 'stock_out': float(x['qty'] or 0)} for x in stock_in_by_day]
+    # Merge stock_out by date
+    out_by_date = {x['day']: float(x['qty'] or 0) for x in stock_out_by_day}
+    for s in stock_series:
+        s['stock_out'] = out_by_date.get(s['date'], 0)
+    # Customer growth: new customer_restaurant links in range by date
+    customer_growth = list(CustomerRestaurant.objects.filter(restaurant_id=restaurant_id, created_at__date__gte=start_date, created_at__date__lte=end_date).annotate(day=TruncDate('created_at')).values('day').annotate(count=Count('id')).order_by('day'))
+    customer_growth_series = [{'date': (x['day'].isoformat() if hasattr(x['day'], 'isoformat') else str(x['day'])[:10]), 'new_customers': x['count']} for x in customer_growth]
+    # Payroll trend by month (salary cost per month from PaidRecord staff)
+    payroll_by_month = PaidRecord.objects.filter(restaurant_id=restaurant_id, staff__isnull=False, created_at__gte=start_dt, created_at__lte=end_dt).annotate(month_key=TruncMonth('created_at')).values('month_key').annotate(amount=Sum('amount')).order_by('month_key')
+    payroll_trend = [{'month': (m['month_key'].strftime('%Y-%m') if hasattr(m['month_key'], 'strftime') else str(m['month_key'])[:7]), 'amount': str(m['amount'] or 0)} for m in payroll_by_month]
+
+    return Response({
+        'overview': overview,
+        'staff_analytics': staff_analytics,
+        'orders_analytics': orders_analytics,
+        'sales_analytics': sales_analytics,
+        'finance_analytics': finance_analytics,
+        'inventory_analytics': inventory_analytics,
+        'vendor_analytics': vendor_analytics,
+        'customer_analytics': customer_analytics,
+        'attendance_analytics': attendance_analytics,
+        'payroll_analytics': payroll_analytics,
+        'charts': {
+            'orders_daily': orders_daily_series,
+            'revenue_series': revenue_series,
+            'expense_trend': expense_trend,
+            'stock_series': stock_series,
+            'customer_growth': customer_growth_series,
+            'payroll_trend': list(payroll_trend),
+        },
     })
 
 
