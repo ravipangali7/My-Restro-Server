@@ -4277,14 +4277,14 @@ def owner_analytics_restaurant(request, restaurant_id):
 
     # Orders (in range)
     order_agg = Order.objects.filter(restaurant_id=restaurant_id, created_at__date__gte=start_date, created_at__date__lte=end_date).aggregate(
-        total=Count('id'),
+        order_count=Count('id'),
         total_revenue=Sum('total'),
         service_charge=Coalesce(Sum('service_charge'), Decimal('0')),
         discount=Coalesce(Sum('discount'), Decimal('0')),
     )
     by_status = dict(Order.objects.filter(restaurant_id=restaurant_id, created_at__date__gte=start_date, created_at__date__lte=end_date).values('status').annotate(c=Count('id')).values_list('status', 'c'))
     orders_analytics = {
-        'total_orders': order_agg['total'] or 0,
+        'total_orders': order_agg['order_count'] or 0,
         'total_revenue': str(order_agg['total_revenue'] or Decimal('0')),
         'service_charge': str(order_agg['service_charge'] or Decimal('0')),
         'discount': str(order_agg['discount'] or Decimal('0')),
