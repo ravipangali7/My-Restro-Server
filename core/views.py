@@ -4012,6 +4012,42 @@ def owner_analytics_comparison(request):
     # Bar series: orders per restaurant, revenue per restaurant
     orders_bar = [{'restaurant_name': rest_map.get(rid, {}).get('name', ''), 'orders': orders_per_rest.get(rid, 0), 'revenue': str(revenue_per_rest.get(rid, Decimal('0')))}
                   for rid in owner_ids]
+    # Revenue bar (revenue per restaurant for bar chart)
+    revenue_bar = [{'restaurant_name': rest_map.get(rid, {}).get('name', ''), 'revenue': str(revenue_per_rest.get(rid, Decimal('0')))}
+                   for rid in owner_ids]
+    # Revenue trend over time (daily aggregate across all owner restaurants)
+    revenue_by_day = list(Order.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__date__gte=start_date,
+        created_at__date__lte=end_date,
+    ).annotate(day=TruncDate('created_at')).values('day').annotate(revenue=Sum('total')).order_by('day'))
+    revenue_trend = [{'date': (x['day'].isoformat() if hasattr(x['day'], 'isoformat') else str(x['day'])[:10]), 'revenue': str(x['revenue'] or 0)} for x in revenue_by_day]
+    # Payroll trend: monthly payroll (per_day_salary * present days) across owner restaurants
+    attendance_by_month_staff = list(Attendance.objects.filter(
+        restaurant_id__in=owner_ids,
+        date__gte=start_date,
+        date__lte=end_date,
+        status=AttendanceStatus.PRESENT,
+    ).annotate(month_key=TruncMonth('date')).values('month_key', 'staff_id').annotate(days=Count('id')))
+    staff_per_day = dict(Staff.objects.filter(restaurant_id__in=owner_ids).values_list('id', 'per_day_salary'))
+    payroll_by_month = {}
+    for row in attendance_by_month_staff:
+        month_key = row['month_key']
+        per_day = staff_per_day.get(row['staff_id']) or Decimal('0')
+        amount = per_day * (row['days'] or 0)
+        payroll_by_month[month_key] = payroll_by_month.get(month_key, Decimal('0')) + amount
+    payroll_trend = [{'month': (m.strftime('%Y-%m') if hasattr(m, 'strftime') else str(m)[:7]), 'amount': str(payroll_by_month.get(m, Decimal('0')))} for m in sorted(payroll_by_month.keys())]
+    # Vendor summary (totals across all owner restaurants)
+    vendor_agg = Vendor.objects.filter(restaurant_id__in=owner_ids).aggregate(
+        total_vendors=Count('id'),
+        total_payables=Coalesce(Sum('to_pay'), Decimal('0')),
+        total_receivables=Coalesce(Sum('to_receive'), Decimal('0')),
+    )
+    vendor_summary = {
+        'total_vendors': vendor_agg['total_vendors'] or 0,
+        'total_payables': str(vendor_agg['total_payables'] or Decimal('0')),
+        'total_receivables': str(vendor_agg['total_receivables'] or Decimal('0')),
+    }
     # Order type distribution (global in range)
     order_type_dist = list(Order.objects.filter(
         restaurant_id__in=owner_ids,
@@ -4181,6 +4217,10 @@ def owner_analytics_comparison(request):
         'top_by_customers': by_customers,
         'top_by_profit': by_profit,
         'orders_bar': orders_bar,
+        'revenue_bar': revenue_bar,
+        'revenue_trend': revenue_trend,
+        'payroll_trend': payroll_trend,
+        'vendor_summary': vendor_summary,
         'order_type_distribution': order_type_distribution,
         'finance_comparison': finance_comparison,
         'vendor_analytics': vendor_analytics,
