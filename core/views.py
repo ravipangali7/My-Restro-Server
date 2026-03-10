@@ -3359,6 +3359,480 @@ def owner_report_credits(request):
     })
 
 
+# ---------- Credit Analytics (owner) ----------
+
+def _credit_analytics_owner_ids(request):
+    """Return owner_ids for credit analytics; filter by restaurant_id if provided."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return None
+    rid_param = request.query_params.get('restaurant_id')
+    if rid_param:
+        try:
+            rid = int(rid_param)
+            if rid in owner_ids:
+                return [rid]
+            return None
+        except ValueError:
+            pass
+    return owner_ids
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_credit_analytics_summary(request):
+    """Global credit summary across owner's restaurants."""
+    owner_ids = _credit_analytics_owner_ids(request)
+    if not owner_ids:
+        return Response({
+            'total_customer_credit': '0',
+            'total_vendor_payable': '0',
+            'total_vendor_receivable': '0',
+            'total_staff_payable': '0',
+            'total_staff_advance': '0',
+            'total_restaurant_due_balance': '0',
+            'total_restaurant_wallet_balance': '0',
+        })
+    total_customer_credit = CustomerRestaurant.objects.filter(restaurant_id__in=owner_ids).aggregate(s=Sum('to_pay'))['s'] or Decimal('0')
+    vendor_agg = Vendor.objects.filter(restaurant_id__in=owner_ids).aggregate(
+        to_pay=Sum('to_pay'), to_receive=Sum('to_receive')
+    )
+    total_vendor_payable = vendor_agg['to_pay'] or Decimal('0')
+    total_vendor_receivable = vendor_agg['to_receive'] or Decimal('0')
+    staff_agg = Staff.objects.filter(restaurant_id__in=owner_ids).aggregate(
+        to_pay=Sum('to_pay'), to_receive=Sum('to_receive')
+    )
+    total_staff_payable = staff_agg['to_pay'] or Decimal('0')
+    total_staff_advance = staff_agg['to_receive'] or Decimal('0')
+    rest_agg = Restaurant.objects.filter(id__in=owner_ids).aggregate(
+        due=Sum('due_balance'), balance=Sum('balance')
+    )
+    total_restaurant_due_balance = rest_agg['due'] or Decimal('0')
+    total_restaurant_wallet_balance = rest_agg['balance'] or Decimal('0')
+    return Response({
+        'total_customer_credit': str(total_customer_credit),
+        'total_vendor_payable': str(total_vendor_payable),
+        'total_vendor_receivable': str(total_vendor_receivable),
+        'total_staff_payable': str(total_staff_payable),
+        'total_staff_advance': str(total_staff_advance),
+        'total_restaurant_due_balance': str(total_restaurant_due_balance),
+        'total_restaurant_wallet_balance': str(total_restaurant_wallet_balance),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_credit_analytics_by_restaurant(request):
+    """Credit comparison by restaurant and distribution by type."""
+    owner_ids = _credit_analytics_owner_ids(request)
+    if not owner_ids:
+        return Response({
+            'restaurants': [],
+            'credit_distribution_by_type': {
+                'customer_credit': '0',
+                'vendor_credit': '0',
+                'staff_salary': '0',
+                'other_dues': '0',
+            },
+        })
+    restaurants_data = []
+    for rest in Restaurant.objects.filter(id__in=owner_ids).order_by('name'):
+        cr_sum = CustomerRestaurant.objects.filter(restaurant=rest).aggregate(s=Sum('to_pay'))['s'] or Decimal('0')
+        v_sum = Vendor.objects.filter(restaurant=rest).aggregate(pay=Sum('to_pay'), recv=Sum('to_receive'))
+        v_pay = v_sum['pay'] or Decimal('0')
+        v_recv = v_sum['recv'] or Decimal('0')
+        s_sum = Staff.objects.filter(restaurant=rest).aggregate(pay=Sum('to_pay'), recv=Sum('to_receive'))
+        s_pay = s_sum['pay'] or Decimal('0')
+        s_recv = s_sum['recv'] or Decimal('0')
+        total_exposure = cr_sum + v_pay + s_pay
+        restaurants_data.append({
+            'id': rest.id,
+            'name': rest.name,
+            'total_credit_exposure': str(total_exposure),
+            'customer_credit': str(cr_sum),
+            'vendor_payable': str(v_pay),
+            'vendor_receivable': str(v_recv),
+            'staff_payable': str(s_pay),
+            'staff_advance': str(s_recv),
+        })
+    total_customer = CustomerRestaurant.objects.filter(restaurant_id__in=owner_ids).aggregate(s=Sum('to_pay'))['s'] or Decimal('0')
+    total_vendor_pay = Vendor.objects.filter(restaurant_id__in=owner_ids).aggregate(s=Sum('to_pay'))['s'] or Decimal('0')
+    total_staff_pay = Staff.objects.filter(restaurant_id__in=owner_ids).aggregate(s=Sum('to_pay'))['s'] or Decimal('0')
+    rest_due = Restaurant.objects.filter(id__in=owner_ids).aggregate(s=Sum('due_balance'))['s'] or Decimal('0')
+    return Response({
+        'restaurants': restaurants_data,
+        'credit_distribution_by_type': {
+            'customer_credit': str(total_customer),
+            'vendor_credit': str(total_vendor_pay),
+            'staff_salary': str(total_staff_pay),
+            'other_dues': str(rest_due),
+        },
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_credit_analytics_customer_report(request):
+    """Customer credit report: table + top customers + by restaurant. Paginated."""
+    owner_ids = _credit_analytics_owner_ids(request)
+    if not owner_ids:
+        return Response({
+            'count': 0, 'next': None, 'previous': None, 'results': [],
+            'top_customers_by_credit': [],
+            'customer_credit_by_restaurant': [],
+        })
+    customer_id_param = request.query_params.get('customer_id')
+    if customer_id_param:
+        try:
+            cid = int(customer_id_param)
+            cr_links = CustomerRestaurant.objects.filter(restaurant_id__in=owner_ids, customer_id=cid)
+            if not cr_links.exists():
+                owner_ids = []
+        except ValueError:
+            pass
+    qs = CustomerRestaurant.objects.filter(restaurant_id__in=owner_ids).select_related('customer', 'restaurant')
+    if customer_id_param:
+        try:
+            qs = qs.filter(customer_id=int(customer_id_param))
+        except ValueError:
+            pass
+    now = timezone.now()
+    results = []
+    for cr in qs:
+        last_order = Order.objects.filter(customer_id=cr.customer_id, restaurant_id=cr.restaurant_id).order_by('-created_at').values('created_at').first()
+        last_order_date = last_order['created_at'].strftime('%Y-%m-%d') if last_order and last_order.get('created_at') else None
+        total_orders = Order.objects.filter(customer_id=cr.customer_id, restaurant_id=cr.restaurant_id).count()
+        if cr.to_pay and cr.to_pay > 0:
+            ref_date = last_order['created_at'] if last_order and last_order.get('created_at') else cr.updated_at
+            if ref_date:
+                if ref_date.tzinfo is None:
+                    ref_date = timezone.make_aware(ref_date)
+                outstanding_days = (now - ref_date).days
+            else:
+                outstanding_days = 0
+        else:
+            outstanding_days = None
+        results.append({
+            'customer_id': cr.customer_id,
+            'customer_name': cr.customer.name if cr.customer_id else '',
+            'restaurant_id': cr.restaurant_id,
+            'restaurant_name': cr.restaurant.name if cr.restaurant_id else '',
+            'to_pay': str(cr.to_pay),
+            'to_receive': str(cr.to_receive),
+            'total_orders': total_orders,
+            'last_order_date': last_order_date,
+            'outstanding_days': outstanding_days,
+        })
+    ordering = (request.query_params.get('ordering') or '').strip()
+    allowed = ['customer_name', '-customer_name', 'to_pay', '-to_pay', 'total_orders', '-total_orders', 'outstanding_days', '-outstanding_days']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        reverse = ordering.startswith('-')
+        key = ordering.lstrip('-')
+        def _sort_key(r):
+            v = r.get(key)
+            if key == 'outstanding_days' and v is None:
+                return -1
+            if key in ('to_pay', 'to_receive'):
+                try:
+                    return float(v) if v is not None else 0.0
+                except (TypeError, ValueError):
+                    return 0.0
+            if key == 'total_orders':
+                return v if isinstance(v, int) else 0
+            return (v or '') if isinstance(v, str) else str(v or '')
+        results.sort(key=_sort_key, reverse=reverse)
+    top_by_credit = sorted(results, key=lambda r: float(r.get('to_pay') or 0), reverse=True)[:10]
+    by_restaurant = []
+    for rest in Restaurant.objects.filter(id__in=owner_ids).order_by('name'):
+        total = sum(float(r.get('to_pay') or 0) for r in results if r.get('restaurant_id') == rest.id)
+        by_restaurant.append({'restaurant_name': rest.name, 'total_to_pay': str(total)})
+    page_size = min(max(int(request.query_params.get('page_size') or 20), 1), 100)
+    page_num = max(1, int(request.query_params.get('page') or 1))
+    from django.core.paginator import Paginator as DjangoPaginator
+    paginator = DjangoPaginator(results, page_size)
+    try:
+        page = paginator.page(page_num)
+    except Exception:
+        page = paginator.page(1)
+    return Response({
+        'count': paginator.count,
+        'next': page_num + 1 if page.has_next() else None,
+        'previous': page_num - 1 if page.has_previous() else None,
+        'results': list(page.object_list),
+        'top_customers_by_credit': [{'customer_name': r['customer_name'], 'to_pay': r['to_pay']} for r in top_by_credit],
+        'customer_credit_by_restaurant': by_restaurant,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_credit_analytics_vendor_report(request):
+    """Vendor credit report: table + chart data. Paginated."""
+    owner_ids = _credit_analytics_owner_ids(request)
+    if not owner_ids:
+        return Response({
+            'count': 0, 'next': None, 'previous': None, 'results': [],
+            'vendor_payables_per_restaurant': [],
+            'vendor_credit_distribution': [],
+        })
+    vendor_id_param = request.query_params.get('vendor_id')
+    qs = Vendor.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant').order_by('name')
+    if vendor_id_param:
+        try:
+            qs = qs.filter(id=int(vendor_id_param))
+        except ValueError:
+            pass
+    results = []
+    for v in qs:
+        purchases_count = Purchase.objects.filter(vendor_id=v.id).count()
+        last_p = Purchase.objects.filter(vendor_id=v.id).order_by('-created_at').first()
+        last_purchase_date = last_p.created_at.strftime('%Y-%m-%d') if last_p else None
+        results.append({
+            'vendor_id': v.id,
+            'vendor_name': v.name,
+            'restaurant_id': v.restaurant_id,
+            'restaurant_name': v.restaurant.name if v.restaurant_id else '',
+            'to_pay': str(v.to_pay),
+            'to_receive': str(v.to_receive),
+            'total_purchases': purchases_count,
+            'last_purchase_date': last_purchase_date,
+        })
+    payables_by_rest = []
+    for rest in Restaurant.objects.filter(id__in=owner_ids).order_by('name'):
+        total = sum(float(r['to_pay']) for r in results if r['restaurant_id'] == rest.id)
+        payables_by_rest.append({'restaurant_name': rest.name, 'total_to_pay': str(total)})
+    total_pay = sum(float(r['to_pay']) for r in results)
+    total_recv = sum(float(r['to_receive']) for r in results)
+    page_size = min(max(int(request.query_params.get('page_size') or 20), 1), 100)
+    page_num = max(1, int(request.query_params.get('page') or 1))
+    from django.core.paginator import Paginator as DjangoPaginator
+    paginator = DjangoPaginator(results, page_size)
+    try:
+        page = paginator.page(page_num)
+    except Exception:
+        page = paginator.page(1)
+    return Response({
+        'count': paginator.count,
+        'next': page_num + 1 if page.has_next() else None,
+        'previous': page_num - 1 if page.has_previous() else None,
+        'results': list(page.object_list),
+        'vendor_payables_per_restaurant': payables_by_rest,
+        'vendor_credit_distribution': [{'label': 'To Pay', 'value': str(total_pay)}, {'label': 'To Receive', 'value': str(total_recv)}],
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_credit_analytics_staff_report(request):
+    """Staff credit report: table + salary pending per restaurant. Paginated."""
+    owner_ids = _credit_analytics_owner_ids(request)
+    if not owner_ids:
+        return Response({
+            'count': 0, 'next': None, 'previous': None, 'results': [],
+            'salary_pending_per_restaurant': [],
+        })
+    qs = Staff.objects.filter(restaurant_id__in=owner_ids).select_related('user', 'restaurant').order_by('restaurant__name', 'user__name')
+    results = []
+    for s in qs:
+        salary_type = getattr(s, 'salary_type', None) or 'per_day'
+        results.append({
+            'staff_id': s.id,
+            'staff_name': (s.user.name if s.user_id else '') or (s.user.get_full_name() if s.user_id else ''),
+            'restaurant_id': s.restaurant_id,
+            'restaurant_name': s.restaurant.name if s.restaurant_id else '',
+            'salary_type': salary_type,
+            'to_pay': str(s.to_pay),
+            'to_receive': str(s.to_receive),
+            'joined_at': s.joined_at.isoformat() if s.joined_at else None,
+        })
+    pending_by_rest = []
+    for rest in Restaurant.objects.filter(id__in=owner_ids).order_by('name'):
+        total = sum(float(r['to_pay']) for r in results if r['restaurant_id'] == rest.id)
+        pending_by_rest.append({'restaurant_name': rest.name, 'total_to_pay': str(total)})
+    page_size = min(max(int(request.query_params.get('page_size') or 20), 1), 100)
+    page_num = max(1, int(request.query_params.get('page') or 1))
+    from django.core.paginator import Paginator as DjangoPaginator
+    paginator = DjangoPaginator(results, page_size)
+    try:
+        page = paginator.page(page_num)
+    except Exception:
+        page = paginator.page(1)
+    return Response({
+        'count': paginator.count,
+        'next': page_num + 1 if page.has_next() else None,
+        'previous': page_num - 1 if page.has_previous() else None,
+        'results': list(page.object_list),
+        'salary_pending_per_restaurant': pending_by_rest,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_credit_analytics_trend(request):
+    """Monthly credit flow: customer receipts, vendor payments, staff salary payments."""
+    owner_ids = _credit_analytics_owner_ids(request)
+    if not owner_ids:
+        return Response({'monthly': []})
+    start_dt, end_dt = _parse_date_range(request)
+    if not start_dt or not end_dt:
+        end_dt = timezone.now()
+        start_dt = end_dt - timedelta(days=365)
+    from django.db.models.functions import TruncMonth
+    from django.db.models import DateTimeField
+    received_by_month = ReceivedRecord.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__gte=start_dt,
+        created_at__lte=end_dt,
+    ).annotate(month=TruncMonth('created_at')).values('month').annotate(amount=Sum('amount')).order_by('month')
+    paid_vendor = PaidRecord.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__gte=start_dt,
+        created_at__lte=end_dt,
+    ).exclude(vendor_id__isnull=True).annotate(month=TruncMonth('created_at')).values('month').annotate(amount=Sum('amount')).order_by('month')
+    paid_staff = PaidRecord.objects.filter(
+        restaurant_id__in=owner_ids,
+        created_at__gte=start_dt,
+        created_at__lte=end_dt,
+    ).exclude(staff_id__isnull=True).annotate(month=TruncMonth('created_at')).values('month').annotate(amount=Sum('amount')).order_by('month')
+    by_month = {}
+    for r in received_by_month:
+        key = r['month'].strftime('%Y-%m') if r['month'] else None
+        if key:
+            by_month.setdefault(key, {'month': key, 'customer_credit_increase': Decimal('0'), 'vendor_payment': Decimal('0'), 'staff_salary_payment': Decimal('0')})
+            by_month[key]['customer_credit_increase'] = r['amount'] or Decimal('0')
+    for r in paid_vendor:
+        key = r['month'].strftime('%Y-%m') if r['month'] else None
+        if key:
+            by_month.setdefault(key, {'month': key, 'customer_credit_increase': Decimal('0'), 'vendor_payment': Decimal('0'), 'staff_salary_payment': Decimal('0')})
+            by_month[key]['vendor_payment'] = r['amount'] or Decimal('0')
+    for r in paid_staff:
+        key = r['month'].strftime('%Y-%m') if r['month'] else None
+        if key:
+            by_month.setdefault(key, {'month': key, 'customer_credit_increase': Decimal('0'), 'vendor_payment': Decimal('0'), 'staff_salary_payment': Decimal('0')})
+            by_month[key]['staff_salary_payment'] = r['amount'] or Decimal('0')
+    monthly = [{'month': k, 'customer_credit_increase': str(v['customer_credit_increase']), 'vendor_payment': str(v['vendor_payment']), 'staff_salary_payment': str(v['staff_salary_payment'])} for k, v in sorted(by_month.items())]
+    return Response({'monthly': monthly})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_credit_analytics_aging(request):
+    """Credit aging: entities with outstanding amount and days_pending; buckets 0-7, 7-30, 30-90, 90+."""
+    owner_ids = _credit_analytics_owner_ids(request)
+    if not owner_ids:
+        return Response({'results': [], 'buckets': {'0_7': 0, '7_30': 0, '30_90': 0, '90_plus': 0}})
+    now = timezone.now()
+    results = []
+    for cr in CustomerRestaurant.objects.filter(restaurant_id__in=owner_ids).select_related('customer', 'restaurant'):
+        if (cr.to_pay or Decimal('0')) <= 0:
+            continue
+        last_order = Order.objects.filter(customer_id=cr.customer_id, restaurant_id=cr.restaurant_id).order_by('-created_at').values('created_at').first()
+        ref = last_order['created_at'] if last_order and last_order.get('created_at') else cr.updated_at
+        if ref and ref.tzinfo is None:
+            ref = timezone.make_aware(ref)
+        days = (now - ref).days if ref else 0
+        results.append({
+            'entity_type': 'customer',
+            'name': cr.customer.name if cr.customer_id else '',
+            'restaurant_name': cr.restaurant.name if cr.restaurant_id else '',
+            'outstanding_amount': str(cr.to_pay),
+            'days_pending': days,
+        })
+    for v in Vendor.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant'):
+        if (v.to_pay or Decimal('0')) <= 0:
+            continue
+        last_p = Purchase.objects.filter(vendor_id=v.id).order_by('-created_at').first()
+        ref = last_p.created_at if last_p else v.updated_at
+        if ref and ref.tzinfo is None:
+            ref = timezone.make_aware(ref)
+        days = (now - ref).days if ref else 0
+        results.append({
+            'entity_type': 'vendor',
+            'name': v.name,
+            'restaurant_name': v.restaurant.name if v.restaurant_id else '',
+            'outstanding_amount': str(v.to_pay),
+            'days_pending': days,
+        })
+    for s in Staff.objects.filter(restaurant_id__in=owner_ids).select_related('user', 'restaurant'):
+        if (s.to_pay or Decimal('0')) <= 0:
+            continue
+        ref = s.updated_at
+        if not ref and s.joined_at:
+            ref = timezone.make_aware(datetime.combine(s.joined_at, time.min))
+        if not ref:
+            ref = now
+        if ref.tzinfo is None:
+            ref = timezone.make_aware(ref)
+        days = (now - ref).days
+        results.append({
+            'entity_type': 'staff',
+            'name': (s.user.name if s.user_id else '') or (s.user.get_full_name() if s.user_id else ''),
+            'restaurant_name': s.restaurant.name if s.restaurant_id else '',
+            'outstanding_amount': str(s.to_pay),
+            'days_pending': days,
+        })
+    buckets = {'0_7': 0, '7_30': 0, '30_90': 0, '90_plus': 0}
+    for r in results:
+        d = r.get('days_pending') or 0
+        if d <= 7:
+            buckets['0_7'] += 1
+        elif d <= 30:
+            buckets['7_30'] += 1
+        elif d <= 90:
+            buckets['30_90'] += 1
+        else:
+            buckets['90_plus'] += 1
+    return Response({'results': results, 'buckets': buckets})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_credit_analytics_risk(request):
+    """Top 10 risk customers and vendors (high credit + long pending days)."""
+    owner_ids = _credit_analytics_owner_ids(request)
+    if not owner_ids:
+        return Response({'top_risk_customers': [], 'top_risk_vendors': []})
+    now = timezone.now()
+    customer_risks = []
+    for cr in CustomerRestaurant.objects.filter(restaurant_id__in=owner_ids, to_pay__gt=0).select_related('customer', 'restaurant'):
+        last_order = Order.objects.filter(customer_id=cr.customer_id, restaurant_id=cr.restaurant_id).order_by('-created_at').values('created_at').first()
+        ref = last_order['created_at'] if last_order and last_order.get('created_at') else cr.updated_at
+        if ref and ref.tzinfo is None:
+            ref = timezone.make_aware(ref)
+        days = (now - ref).days if ref else 0
+        score = float(cr.to_pay) * (1 + days / 30)
+        customer_risks.append({
+            'customer_id': cr.customer_id,
+            'customer_name': cr.customer.name if cr.customer_id else '',
+            'restaurant_name': cr.restaurant.name if cr.restaurant_id else '',
+            'outstanding_amount': str(cr.to_pay),
+            'days_pending': days,
+            'risk_score': round(score, 2),
+        })
+    customer_risks.sort(key=lambda x: x['risk_score'], reverse=True)
+    vendor_risks = []
+    for v in Vendor.objects.filter(restaurant_id__in=owner_ids, to_pay__gt=0).select_related('restaurant'):
+        last_p = Purchase.objects.filter(vendor_id=v.id).order_by('-created_at').first()
+        ref = last_p.created_at if last_p else v.updated_at
+        if ref and ref.tzinfo is None:
+            ref = timezone.make_aware(ref)
+        days = (now - ref).days if ref else 0
+        score = float(v.to_pay) * (1 + days / 30)
+        vendor_risks.append({
+            'vendor_id': v.id,
+            'vendor_name': v.name,
+            'restaurant_name': v.restaurant.name if v.restaurant_id else '',
+            'outstanding_amount': str(v.to_pay),
+            'days_pending': days,
+            'risk_score': round(score, 2),
+        })
+    vendor_risks.sort(key=lambda x: x['risk_score'], reverse=True)
+    return Response({
+        'top_risk_customers': customer_risks[:10],
+        'top_risk_vendors': vendor_risks[:10],
+    })
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_report_customers(request):
@@ -4261,6 +4735,7 @@ def owner_analytics_restaurant(request, restaurant_id):
         'id': rest.id,
         'name': rest.name,
         'phone': rest.phone or '',
+        'country_code': rest.country_code or '',
         'slug': rest.slug,
         'address': rest.address or '',
         'latitude': str(rest.latitude) if rest.latitude is not None else None,
