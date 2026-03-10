@@ -42,6 +42,8 @@ urlpatterns = [
     path('owner/reports/products/', views.owner_report_products),
     path('owner/reports/inventory/', views.owner_report_inventory),
     path('owner/reports/pl/', views.owner_report_pl),
+    path('owner/reports/orders/', views.owner_report_orders),
+    path('owner/reports/vendors/', views.owner_report_vendors),
     path('owner/analytics/overview/', views.owner_analytics_overview),
     path('owner/analytics/comparison/', views.owner_analytics_comparison),
     path('owner/analytics/restaurant/<int:restaurant_id>/', views.owner_analytics_restaurant),

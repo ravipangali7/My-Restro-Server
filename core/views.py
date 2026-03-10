@@ -3652,6 +3652,116 @@ def owner_report_pl(request):
     })
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_report_orders(request):
+    """Order report: list orders with date filter, status, ordering, pagination. Owner/manager scope."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    qs = Order.objects.filter(restaurant_id__in=owner_ids).annotate(
+        items_count=Count('items'),
+    ).select_related('table').order_by('-created_at')
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    status_param = request.query_params.get('status', '').strip()
+    if status_param:
+        qs = qs.filter(status=status_param)
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    allowed_ordering = ['id', '-id', 'created_at', '-created_at', 'total', '-total', 'status', '-status', 'table_number', '-table_number']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed_ordering]:
+        qs = qs.order_by(ordering)
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(qs, request)
+    results = [
+        {
+            'order_id': str(o.id),
+            'date': o.created_at.strftime('%Y-%m-%d') if hasattr(o.created_at, 'strftime') else str(o.created_at)[:10],
+            'table_name': o.table_number or (o.table.name if o.table_id else '') or '—',
+            'items_count': getattr(o, 'items_count', 0),
+            'total': str(o.total),
+            'status': o.status,
+            'payment_method': o.payment_method or '',
+        }
+        for o in page
+    ]
+    return paginator.get_paginated_response(results)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_report_vendors(request):
+    """Vendor report: per-vendor aggregates (purchases count, total amount, paid, unpaid, last purchase). Date range, pagination."""
+    owner_ids = _owner_or_manager_restaurant_ids(request)
+    if owner_ids is None or not owner_ids:
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    start_s, end_s = _get_date_filter_bounds(request)
+    purchase_qs = Purchase.objects.filter(restaurant_id__in=owner_ids).select_related('vendor')
+    if start_s:
+        purchase_qs = purchase_qs.filter(created_at__date__gte=start_s)
+    if end_s:
+        purchase_qs = purchase_qs.filter(created_at__date__lte=end_s)
+    vendor_ids = list(purchase_qs.values_list('vendor_id', flat=True).distinct())
+    vendor_ids = [x for x in vendor_ids if x is not None]
+    if not vendor_ids:
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    vendors = Vendor.objects.filter(id__in=vendor_ids, restaurant_id__in=owner_ids).order_by('name')
+    results = []
+    for v in vendors:
+        v_purchases = purchase_qs.filter(vendor_id=v.id)
+        purchases_count = v_purchases.count()
+        total_amount = v_purchases.aggregate(s=Sum('total'))['s'] or Decimal('0')
+        last_p = v_purchases.order_by('-created_at').first()
+        last_purchase_date = last_p.created_at.strftime('%Y-%m-%d') if last_p and hasattr(last_p.created_at, 'strftime') else (str(last_p.created_at)[:10] if last_p else '')
+        unpaid = v.to_pay
+        results.append({
+            'vendor_id': v.id,
+            'vendor_name': v.name,
+            'purchases_count': purchases_count,
+            'total_amount': str(total_amount),
+            'paid': str(max(Decimal('0'), total_amount - unpaid)),
+            'unpaid': str(unpaid),
+            'last_purchase_date': last_purchase_date,
+        })
+    ordering = (request.query_params.get('ordering') or request.query_params.get('sort') or '').strip()
+    allowed_order = ['vendor_name', '-vendor_name', 'purchases_count', '-purchases_count', 'total_amount', '-total_amount', 'unpaid', '-unpaid']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed_order]:
+        reverse = ordering.startswith('-')
+        key = ordering.lstrip('-')
+        def _sort_key(r):
+            val = r.get(key)
+            if key in ('purchases_count',):
+                return val if isinstance(val, (int, float)) else 0
+            if key in ('total_amount', 'paid', 'unpaid'):
+                try:
+                    return float(val) if val is not None else 0.0
+                except (TypeError, ValueError):
+                    return 0.0
+            return (val or '') if isinstance(val, str) else str(val or '')
+        results.sort(key=_sort_key, reverse=reverse)
+    page_num = request.query_params.get('page')
+    page_size_param = request.query_params.get('page_size')
+    page_size = int(page_size_param) if page_size_param and str(page_size_param).isdigit() else 20
+    page_size = min(max(page_size, 1), 100)
+    from django.core.paginator import Paginator as DjangoPaginator
+    django_paginator = DjangoPaginator(results, page_size)
+    try:
+        page_number = int(page_num) if page_num and str(page_num).isdigit() else 1
+    except (TypeError, ValueError):
+        page_number = 1
+    if page_number < 1:
+        page_number = 1
+    try:
+        page = django_paginator.page(page_number)
+    except Exception:
+        page = django_paginator.page(1)
+    return Response({
+        'count': django_paginator.count,
+        'next': page.has_next() and (page_number + 1) or None,
+        'previous': page.has_previous() and (page_number - 1) or None,
+        'results': list(page.object_list),
+    })
+
+
 def _require_owner_analytics(request):
     """Owner-only analytics: return (owner_ids, None) or (None, 403 Response)."""
     if not getattr(request.user, 'is_owner', False):
