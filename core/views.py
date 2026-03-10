@@ -48,7 +48,7 @@ from .models import (
     Expenses,
 )
 from .models import PaymentStatus, DiscountType, OrderType, OrderStatus, StockLog, StockLogType
-from .permissions import IsSuperuser, IsSuperuserOrOwner
+from .permissions import IsSuperuser, IsSuperuserOrOwner, IsCustomer
 from .serializers import (
     _build_media_url,
     OwnerSerializer,
@@ -5409,7 +5409,7 @@ def _current_customer(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCustomer])
 def customer_dashboard_stats(request):
     """Dashboard stats for current customer: orders count, recent orders, restaurants linked, credit summary."""
     cust = _current_customer(request)
@@ -5442,7 +5442,7 @@ def customer_dashboard_stats(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCustomer])
 def customer_restaurants_list(request):
     """List restaurants for customer browse (read-only). Paginated."""
     cust = _current_customer(request)
@@ -5475,7 +5475,7 @@ def customer_restaurants_list(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCustomer])
 def customer_restaurant_detail(request, pk):
     """Restaurant detail + categories + products for customer (read-only menu)."""
     cust = _current_customer(request)
@@ -5524,7 +5524,7 @@ def customer_restaurant_detail(request, pk):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCustomer])
 def customer_restaurant_tables(request, pk):
     """List tables for a restaurant (read-only). Used by customer to choose table for Table/Packing order type."""
     cust = _current_customer(request)
@@ -5666,7 +5666,7 @@ def _customer_order_create(request):
 
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCustomer])
 def customer_orders_list(request):
     """GET: List orders for current customer. POST: Create order for current customer."""
     if request.method == 'POST':
@@ -5729,21 +5729,8 @@ def customer_orders_list(request):
     return resp
 
 
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def customer_order_detail(request, pk):
-    """Order detail for current customer (own order only)."""
-    cust = _current_customer(request)
-    if not cust:
-        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
-    try:
-        order = Order.objects.filter(customer=cust).select_related(
-            'restaurant', 'table', 'waiter', 'waiter__user'
-        ).prefetch_related(
-            'items__product', 'items__product_variant', 'items__product_variant__product', 'items__combo_set'
-        ).get(pk=pk)
-    except Order.DoesNotExist:
-        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+def _customer_order_detail_response(order, cust):
+    """Build order detail payload for customer (used by GET and after PATCH)."""
     items = []
     subtotal = Decimal('0')
     for item in order.items.all():
@@ -5757,7 +5744,7 @@ def customer_order_detail(request, pk):
             'total': str(line_total),
         })
     has_feedback = Feedback.objects.filter(order=order, customer=cust).exists()
-    return Response({
+    return {
         'id': order.id,
         'restaurant_id': order.restaurant_id,
         'restaurant_name': order.restaurant.name if order.restaurant_id else '',
@@ -5773,11 +5760,41 @@ def customer_order_detail(request, pk):
         'created_at': order.created_at.isoformat() if hasattr(order.created_at, 'isoformat') else str(order.created_at),
         'items': items,
         'has_feedback': has_feedback,
-    })
+    }
+
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated, IsCustomer])
+def customer_order_detail(request, pk):
+    """Order detail for current customer (own order only). PATCH: cancel order (set status=rejected) only when pending/accepted."""
+    cust = _current_customer(request)
+    if not cust:
+        return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        order = Order.objects.filter(customer=cust).select_related(
+            'restaurant', 'table', 'waiter', 'waiter__user'
+        ).prefetch_related(
+            'items__product', 'items__product_variant', 'items__product_variant__product', 'items__combo_set'
+        ).get(pk=pk)
+    except Order.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'PATCH':
+        data = request.data if hasattr(request.data, 'get') else {}
+        if data.get('status') == 'rejected':
+            if order.status not in (OrderStatus.PENDING, OrderStatus.ACCEPTED):
+                return Response(
+                    {'detail': 'Order can only be cancelled when it is pending or accepted.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            order.status = OrderStatus.REJECTED
+            order.save(update_fields=['status'])
+        else:
+            return Response({'detail': 'Only status=rejected (cancel) is allowed.'}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(_customer_order_detail_response(order, cust))
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCustomer])
 def customer_transactions_list(request):
     """List received records (payments) for current customer. Read-only."""
     cust = _current_customer(request)
@@ -5819,7 +5836,7 @@ def customer_transactions_list(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCustomer])
 def customer_transaction_detail(request, pk):
     """Single received record for current customer."""
     cust = _current_customer(request)
@@ -5844,7 +5861,7 @@ def customer_transaction_detail(request, pk):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCustomer])
 def customer_transactions_analytics(request):
     """Order-based transaction analytics for current customer: table rows, by_restaurant, top_products, monthly trend."""
     cust = _current_customer(request)
@@ -5929,7 +5946,7 @@ def customer_transactions_analytics(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCustomer])
 def customer_credits_list(request):
     """Credits/balance per restaurant for current customer. Read-only."""
     cust = _current_customer(request)
@@ -5961,7 +5978,7 @@ def customer_credits_list(request):
 
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCustomer])
 def customer_feedback_list(request):
     """GET: List feedback for current customer. POST: Create feedback for an order."""
     cust = _current_customer(request)
@@ -6033,10 +6050,10 @@ def customer_feedback_list(request):
     })
 
 
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@api_view(['GET', 'DELETE'])
+@permission_classes([IsAuthenticated, IsCustomer])
 def customer_feedback_detail(request, pk):
-    """Single feedback for current customer."""
+    """Single feedback for current customer. DELETE: remove own feedback."""
     cust = _current_customer(request)
     if not cust:
         return Response({'detail': 'Customer profile not found.'}, status=status.HTTP_403_FORBIDDEN)
@@ -6044,6 +6061,9 @@ def customer_feedback_detail(request, pk):
         fb = Feedback.objects.filter(customer=cust).select_related('restaurant', 'order').get(pk=pk)
     except Feedback.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'DELETE':
+        fb.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
     serializer = FeedbackDetailSerializer(fb, context={'request': request})
     data = serializer.data
     data['restaurant_id'] = fb.restaurant_id
@@ -6060,6 +6080,8 @@ def _customer_me_response(cust, request):
         'phone': cust.phone,
         'country_code': cust.country_code,
         'address': cust.address or '',
+        'notifications_enabled': getattr(cust, 'notifications_enabled', True),
+        'receive_updates': getattr(cust, 'receive_updates', True),
     }
     if cust.user_id:
         user = cust.user
@@ -6072,7 +6094,7 @@ def _customer_me_response(cust, request):
 
 
 @api_view(['GET', 'PATCH'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCustomer])
 def customer_me(request):
     """GET: Customer profile. PATCH: Update name, phone, country_code, address, image. Sync to User when present."""
     cust = _current_customer(request)
@@ -6090,6 +6112,10 @@ def customer_me(request):
         cust.country_code = str(data['country_code']).strip()
     if 'address' in data:
         cust.address = (data.get('address') or '').strip()
+    if 'notifications_enabled' in data and data.get('notifications_enabled') is not None:
+        cust.notifications_enabled = bool(data['notifications_enabled'])
+    if 'receive_updates' in data and data.get('receive_updates') is not None:
+        cust.receive_updates = bool(data['receive_updates'])
     cust.save()
     image_file = request.FILES.get('image') if hasattr(request, 'FILES') else None
     if cust.user_id:

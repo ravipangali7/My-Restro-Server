@@ -19,3 +19,11 @@ class IsSuperuserOrOwner(permissions.BasePermission):
                 or getattr(request.user, 'is_restaurant_staff', False)
             )
         )
+
+
+class IsCustomer(permissions.BasePermission):
+    """Only users with a customer profile can access. Use with _current_customer() for data scoping."""
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        return hasattr(request.user, 'customer_profile') and request.user.customer_profile is not None

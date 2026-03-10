@@ -161,6 +161,8 @@ class Customer(models.Model):
     address = models.TextField(blank=True)
     password = models.CharField(max_length=128, default='!')  # hashed; '!' = unusable for existing rows
     fcm_token = models.CharField(max_length=255, blank=True)
+    notifications_enabled = models.BooleanField(default=True)
+    receive_updates = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
