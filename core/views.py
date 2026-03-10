@@ -4375,6 +4375,34 @@ def owner_analytics_restaurant(request, restaurant_id):
 
 
 @api_view(['POST'])
+@permission_classes([IsAuthenticated, IsSuperuserOrOwner])
+def owner_restaurant_pay_due(request, pk):
+    """Owner-only. Pay full due balance for own restaurant. Amount taken from DB."""
+    from .services import pay_due_balance
+    owner_ids, err = _require_owner_analytics(request)
+    if err is not None:
+        return err
+    if pk not in owner_ids:
+        return Response({'detail': 'Restaurant not found or access denied.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        rest = Restaurant.objects.get(pk=pk)
+    except Restaurant.DoesNotExist:
+        return Response({'detail': 'Restaurant not found.'}, status=status.HTTP_404_NOT_FOUND)
+    current_due = rest.due_balance or Decimal('0')
+    if current_due <= 0:
+        return Response({'detail': 'No due balance to pay.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        pay_due_balance(rest, rest.due_balance)
+    except Exception as e:
+        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    rest.refresh_from_db()
+    return Response({
+        'due_balance': str(rest.due_balance),
+        'name': rest.name,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
 @permission_classes([IsAuthenticated, IsSuperuser])
 def restaurant_pay_due(request, pk):
     from .services import pay_due_balance

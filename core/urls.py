@@ -47,6 +47,7 @@ urlpatterns = [
     path('owner/analytics/overview/', views.owner_analytics_overview),
     path('owner/analytics/comparison/', views.owner_analytics_comparison),
     path('owner/analytics/restaurant/<int:restaurant_id>/', views.owner_analytics_restaurant),
+    path('owner/restaurants/<int:pk>/pay-due/', views.owner_restaurant_pay_due),
     # Units (owner/manager)
     path('units/', views.units_list),
     path('units/<int:pk>/', views.unit_detail),
