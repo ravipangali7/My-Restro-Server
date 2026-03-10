@@ -173,6 +173,42 @@ def _parse_date_range(request):
     return None, None
 
 
+def _get_date_filter_bounds(request):
+    """
+    Return (start_date_str, end_date_str) from request: date_filter (today, yesterday, this_week, this_month, this_year)
+    or start_date/end_date. Returns (None, None) if no filter.
+    """
+    date_filter_value = (request.query_params.get('date_filter') or '').strip().lower()
+    start_date = (request.query_params.get('start_date') or '').strip()[:10]
+    end_date = (request.query_params.get('end_date') or '').strip()[:10]
+    if date_filter_value:
+        today = timezone.now().date()
+        if date_filter_value == 'today':
+            start_date = end_date = today.isoformat()
+        elif date_filter_value == 'yesterday':
+            yesterday = today - timedelta(days=1)
+            start_date = end_date = yesterday.isoformat()
+        elif date_filter_value == 'this_week':
+            start_d = today - timedelta(days=today.weekday())
+            start_date = start_d.isoformat()
+            end_date = today.isoformat()
+        elif date_filter_value == 'this_month':
+            start_d = today.replace(day=1)
+            start_date = start_d.isoformat()
+            end_date = today.isoformat()
+        elif date_filter_value == 'this_year':
+            start_d = today.replace(month=1, day=1)
+            start_date = start_d.isoformat()
+            end_date = today.isoformat()
+    if start_date and end_date:
+        return start_date, end_date
+    if start_date:
+        return start_date, end_date or start_date
+    if end_date:
+        return end_date, end_date
+    return None, None
+
+
 def _apply_date_filter_to_queryset(qs, request, date_field='created_at'):
     """
     Apply date filtering from request: date_filter (today, yesterday, this_week, this_month, this_year)
@@ -1210,16 +1246,31 @@ def owner_feedback_detail(request, pk):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_customers_list(request):
-    """List customers with orders in owner's restaurants; total_orders, total_spent, credit_due."""
+    """List customers with orders in owner's restaurants; total_orders, total_spent, credit_due. Supports date_filter/start_date/end_date."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
         return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
-    qs = Customer.objects.filter(orders__restaurant_id__in=owner_ids).exclude(
-        user__is_restaurant_staff=True
-    ).distinct().annotate(
-        total_orders=Count('orders'),
-        total_spent=Coalesce(Sum('orders__total'), Value(Decimal('0'))),
-    ).order_by('-total_spent')
+    start_s, end_s = _get_date_filter_bounds(request)
+    order_qs = Order.objects.filter(restaurant_id__in=owner_ids)
+    if start_s:
+        order_qs = order_qs.filter(created_at__date__gte=start_s)
+    if end_s:
+        order_qs = order_qs.filter(created_at__date__lte=end_s)
+    customer_ids = list(order_qs.values_list('customer_id', flat=True).distinct())
+    customer_ids = [x for x in customer_ids if x is not None]
+    if not customer_ids:
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
+    qs = Customer.objects.filter(id__in=customer_ids).exclude(user__is_restaurant_staff=True)
+    if start_s and end_s:
+        qs = qs.annotate(
+            total_orders=Count('orders', filter=Q(orders__restaurant_id__in=owner_ids, orders__created_at__date__gte=start_s, orders__created_at__date__lte=end_s)),
+            total_spent=Coalesce(Sum('orders__total', filter=Q(orders__restaurant_id__in=owner_ids, orders__created_at__date__gte=start_s, orders__created_at__date__lte=end_s)), Value(Decimal('0'))),
+        ).order_by('-total_spent')
+    else:
+        qs = qs.annotate(
+            total_orders=Count('orders', filter=Q(orders__restaurant_id__in=owner_ids)),
+            total_spent=Coalesce(Sum('orders__total', filter=Q(orders__restaurant_id__in=owner_ids)), Value(Decimal('0'))),
+        ).order_by('-total_spent')
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(Q(name__icontains=search) | Q(phone__icontains=search))
@@ -3073,7 +3124,44 @@ def owner_payroll_list(request):
             'due': str(due),
             'status': 'paid' if due == 0 else 'pending',
         })
-    return Response({'count': len(results), 'next': None, 'previous': None, 'results': results})
+    ordering = (request.query_params.get('ordering') or request.query_params.get('sort') or '').strip()
+    allowed_order = ['staff_name', '-staff_name', 'restaurant_name', '-restaurant_name', 'days', '-days', 'due', '-due', 'status', '-status']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed_order]:
+        reverse = ordering.startswith('-')
+        key = ordering.lstrip('-')
+        def _sort_key(r):
+            v = r.get(key)
+            if key == 'days':
+                return v if isinstance(v, (int, float)) else 0
+            if key == 'due':
+                try:
+                    return float(v) if v is not None else 0.0
+                except (TypeError, ValueError):
+                    return 0.0
+            return (v or '') if isinstance(v, str) else str(v or '')
+        results.sort(key=_sort_key, reverse=reverse)
+    page_num = request.query_params.get('page')
+    page_size_param = request.query_params.get('page_size')
+    page_size = int(page_size_param) if page_size_param and str(page_size_param).isdigit() else 20
+    page_size = min(max(page_size, 1), 100)
+    from django.core.paginator import Paginator as DjangoPaginator
+    django_paginator = DjangoPaginator(results, page_size)
+    try:
+        page_number = int(page_num) if page_num and str(page_num).isdigit() else 1
+    except (TypeError, ValueError):
+        page_number = 1
+    if page_number < 1:
+        page_number = 1
+    try:
+        page = django_paginator.page(page_number)
+    except Exception:
+        page = django_paginator.page(1)
+    return Response({
+        'count': django_paginator.count,
+        'next': page.next_page_number() if page.has_next() else None,
+        'previous': page.previous_page_number() if page.has_previous() else None,
+        'results': list(page.object_list),
+    })
 
 
 @api_view(['GET'])
@@ -3136,10 +3224,10 @@ def owner_performance(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_report_staff(request):
-    """Staff report: filters restaurant, date range, role; table Staff, Restaurant, Role, Attendance days, Salary, Paid, Due, Status."""
+    """Staff report: filters restaurant, date range, role; table Staff, Restaurant, Role, Attendance days, Salary, Paid, Due, Status. Supports ordering and pagination."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
-        return Response({'results': []})
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
     start_dt, end_dt = _parse_date_range(request)
     restaurant_id = request.query_params.get('restaurant_id')
     if restaurant_id:
@@ -3161,7 +3249,7 @@ def owner_report_staff(request):
         qs = qs.filter(is_waiter=True)
     elif role_filter == 'kitchen':
         qs = qs.filter(is_kitchen=True)
-    qs = qs.select_related('user', 'restaurant').order_by('restaurant__name', 'user__name')
+    qs = qs.select_related('user', 'restaurant')
     results = []
     for s in qs:
         if start_dt and end_dt:
@@ -3170,6 +3258,7 @@ def owner_report_staff(request):
             days = Attendance.objects.filter(staff=s, status=AttendanceStatus.PRESENT).count()
         role = 'manager' if s.is_manager else ('waiter' if s.is_waiter else ('kitchen' if s.is_kitchen else 'staff'))
         results.append({
+            'staff_id': s.id,
             'staff_name': s.user.name if s.user_id else '',
             'restaurant_name': s.restaurant.name if s.restaurant_id else '',
             'role': role,
@@ -3178,7 +3267,44 @@ def owner_report_staff(request):
             'to_pay': str(s.to_pay),
             'status': 'active' if not s.is_suspend else 'inactive',
         })
-    return Response({'results': results})
+    ordering = (request.query_params.get('ordering') or request.query_params.get('sort') or '').strip()
+    allowed_order = ['staff_name', '-staff_name', 'restaurant_name', '-restaurant_name', 'role', '-role', 'attendance_days', '-attendance_days', 'to_pay', '-to_pay', 'status', '-status']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed_order]:
+        reverse = ordering.startswith('-')
+        key = ordering.lstrip('-')
+        def _sort_key(r):
+            v = r.get(key)
+            if key == 'attendance_days':
+                return v if isinstance(v, (int, float)) else 0
+            if key == 'to_pay':
+                try:
+                    return float(v) if v is not None else 0.0
+                except (TypeError, ValueError):
+                    return 0.0
+            return (v or '') if isinstance(v, str) else str(v or '')
+        results.sort(key=_sort_key, reverse=reverse)
+    page_num = request.query_params.get('page')
+    page_size_param = request.query_params.get('page_size')
+    page_size = int(page_size_param) if page_size_param and str(page_size_param).isdigit() else 20
+    page_size = min(max(page_size, 1), 100)
+    from django.core.paginator import Paginator as DjangoPaginator
+    django_paginator = DjangoPaginator(results, page_size)
+    try:
+        page_number = int(page_num) if page_num and str(page_num).isdigit() else 1
+    except (TypeError, ValueError):
+        page_number = 1
+    if page_number < 1:
+        page_number = 1
+    try:
+        page = django_paginator.page(page_number)
+    except Exception:
+        page = django_paginator.page(1)
+    return Response({
+        'count': django_paginator.count,
+        'next': page.next_page_number() if page.has_next() else None,
+        'previous': page.previous_page_number() if page.has_previous() else None,
+        'results': list(page.object_list),
+    })
 
 
 @api_view(['GET'])
@@ -3221,10 +3347,10 @@ def owner_report_credits(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_report_customers(request):
-    """Customer report: Customer, Orders, Spent, Credit, Tier; filters restaurant, date."""
+    """Customer report: Customer, Orders, Spent, Credit, Tier; filters restaurant, date. Supports ordering and pagination."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
-        return Response({'results': []})
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
     start_dt, end_dt = _parse_date_range(request)
     restaurant_id = request.query_params.get('restaurant_id')
     if restaurant_id:
@@ -3244,7 +3370,7 @@ def owner_report_customers(request):
     customer_ids = order_filter.values_list('customer_id', flat=True).distinct()
     customer_ids = [x for x in customer_ids if x is not None]
     if not customer_ids:
-        return Response({'results': []})
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
     qs = Customer.objects.filter(id__in=customer_ids).exclude(user__is_restaurant_staff=True)
     results = []
     for c in qs:
@@ -3266,16 +3392,53 @@ def owner_report_customers(request):
             'credit': str(credit),
             'tier': tier,
         })
-    return Response({'results': results})
+    ordering = (request.query_params.get('ordering') or request.query_params.get('sort') or '').strip()
+    allowed_order = ['customer_name', '-customer_name', 'orders', '-orders', 'spent', '-spent', 'credit', '-credit', 'tier', '-tier']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed_order]:
+        reverse = ordering.startswith('-')
+        key = ordering.lstrip('-')
+        def _sort_key(r):
+            v = r.get(key)
+            if key in ('orders',):
+                return v if isinstance(v, (int, float)) else 0
+            if key in ('spent', 'credit'):
+                try:
+                    return float(v) if v is not None else 0.0
+                except (TypeError, ValueError):
+                    return 0.0
+            return (v or '') if isinstance(v, str) else str(v or '')
+        results.sort(key=_sort_key, reverse=reverse)
+    page_num = request.query_params.get('page')
+    page_size_param = request.query_params.get('page_size')
+    page_size = int(page_size_param) if page_size_param and str(page_size_param).isdigit() else 20
+    page_size = min(max(page_size, 1), 100)
+    from django.core.paginator import Paginator as DjangoPaginator
+    django_paginator = DjangoPaginator(results, page_size)
+    try:
+        page_number = int(page_num) if page_num and str(page_num).isdigit() else 1
+    except (TypeError, ValueError):
+        page_number = 1
+    if page_number < 1:
+        page_number = 1
+    try:
+        page = django_paginator.page(page_number)
+    except Exception:
+        page = django_paginator.page(1)
+    return Response({
+        'count': django_paginator.count,
+        'next': page.next_page_number() if page.has_next() else None,
+        'previous': page.previous_page_number() if page.has_previous() else None,
+        'results': list(page.object_list),
+    })
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_report_products(request):
-    """Product report: product-wise sales quantity, revenue; filters restaurant, category, date."""
+    """Product report: product-wise sales quantity, revenue; filters restaurant, category, date. Supports ordering and pagination."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
-        return Response({'results': []})
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
     from .models import OrderItem, Product
     start_dt, end_dt = _parse_date_range(request)
     order_qs = Order.objects.filter(restaurant_id__in=owner_ids, payment_status__in=['paid', 'success'])
@@ -3283,29 +3446,101 @@ def owner_report_products(request):
         order_qs = order_qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
     order_ids = list(order_qs.values_list('id', flat=True))
     if not order_ids:
-        return Response({'results': []})
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
     items = OrderItem.objects.filter(order_id__in=order_ids).values('product_id', 'product__name').annotate(
         quantity=Count('id'),
         revenue=Sum('total'),
     )
     results = [{'product_id': r['product_id'], 'product_name': r['product__name'] or '', 'quantity': r['quantity'], 'revenue': str(r['revenue'] or 0)} for r in items]
-    return Response({'results': results})
+    ordering = (request.query_params.get('ordering') or request.query_params.get('sort') or '').strip()
+    allowed_order = ['product_name', '-product_name', 'quantity', '-quantity', 'revenue', '-revenue']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed_order]:
+        reverse = ordering.startswith('-')
+        key = ordering.lstrip('-')
+        def _sort_key(r):
+            v = r.get(key)
+            if key == 'quantity':
+                return v if isinstance(v, (int, float)) else 0
+            if key == 'revenue':
+                try:
+                    return float(v) if v is not None else 0.0
+                except (TypeError, ValueError):
+                    return 0.0
+            return (v or '') if isinstance(v, str) else str(v or '')
+        results.sort(key=_sort_key, reverse=reverse)
+    page_num = request.query_params.get('page')
+    page_size_param = request.query_params.get('page_size')
+    page_size = int(page_size_param) if page_size_param and str(page_size_param).isdigit() else 20
+    page_size = min(max(page_size, 1), 100)
+    from django.core.paginator import Paginator as DjangoPaginator
+    django_paginator = DjangoPaginator(results, page_size)
+    try:
+        page_number = int(page_num) if page_num and str(page_num).isdigit() else 1
+    except (TypeError, ValueError):
+        page_number = 1
+    if page_number < 1:
+        page_number = 1
+    try:
+        page = django_paginator.page(page_number)
+    except Exception:
+        page = django_paginator.page(1)
+    return Response({
+        'count': django_paginator.count,
+        'next': page.next_page_number() if page.has_next() else None,
+        'previous': page.previous_page_number() if page.has_previous() else None,
+        'results': list(page.object_list),
+    })
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuserOrOwner])
 def owner_report_inventory(request):
-    """Inventory report: stock levels, low-stock; by restaurant, raw material; owner scope."""
+    """Inventory report: stock levels, low-stock; by restaurant, raw material; owner scope. Supports ordering and pagination."""
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is None or not owner_ids:
-        return Response({'results': []})
+        return Response({'count': 0, 'next': None, 'previous': None, 'results': []})
     try:
         from .models import RawMaterial
         qs = RawMaterial.objects.filter(restaurant_id__in=owner_ids).select_related('restaurant').order_by('name')
         results = [{'id': r.id, 'name': r.name, 'restaurant_name': r.restaurant.name if r.restaurant_id else '', 'stock': str(getattr(r, 'stock', 0)), 'min_stock': str(getattr(r, 'min_stock', 0))} for r in qs]
     except Exception:
         results = []
-    return Response({'results': results})
+    ordering = (request.query_params.get('ordering') or request.query_params.get('sort') or 'name').strip()
+    allowed_order = ['name', '-name', 'restaurant_name', '-restaurant_name', 'stock', '-stock', 'min_stock', '-min_stock']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed_order]:
+        reverse = ordering.startswith('-')
+        key = ordering.lstrip('-')
+        def _sort_key(r):
+            v = r.get(key)
+            if key in ('stock', 'min_stock'):
+                try:
+                    return float(v) if v is not None else 0.0
+                except (TypeError, ValueError):
+                    return 0.0
+            return (v or '') if isinstance(v, str) else str(v or '')
+        results.sort(key=_sort_key, reverse=reverse)
+    page_num = request.query_params.get('page')
+    page_size_param = request.query_params.get('page_size')
+    page_size = int(page_size_param) if page_size_param and str(page_size_param).isdigit() else 20
+    page_size = min(max(page_size, 1), 100)
+    from django.core.paginator import Paginator as DjangoPaginator
+    django_paginator = DjangoPaginator(results, page_size)
+    try:
+        page_number = int(page_num) if page_num and str(page_num).isdigit() else 1
+    except (TypeError, ValueError):
+        page_number = 1
+    if page_number < 1:
+        page_number = 1
+    try:
+        page = django_paginator.page(page_number)
+    except Exception:
+        page = django_paginator.page(1)
+    return Response({
+        'count': django_paginator.count,
+        'next': page.next_page_number() if page.has_next() else None,
+        'previous': page.previous_page_number() if page.has_previous() else None,
+        'results': list(page.object_list),
+    })
 
 
 @api_view(['GET'])
