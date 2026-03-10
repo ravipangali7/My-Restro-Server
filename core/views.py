@@ -3999,7 +3999,7 @@ def restaurant_pay_due(request, pk):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsSuperuser])
 def kyc_list(request):
-    qs = User.objects.filter(is_owner=True).order_by('-created_at')
+    qs = User.objects.filter(is_owner=True)
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(
@@ -4010,9 +4010,13 @@ def kyc_list(request):
     status_filter = request.query_params.get('status')
     if status_filter in ('pending', 'approved', 'rejected'):
         qs = qs.filter(kyc_status=status_filter)
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is not None and end_dt is not None:
-        qs = qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    allowed = ['created_at', '-created_at', 'name', '-name', 'kyc_status', '-kyc_status', 'id', '-id']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
+    else:
+        qs = qs.order_by('-created_at')
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     serializer = OwnerSerializer(page, many=True, context={'request': request})
@@ -4039,7 +4043,7 @@ def kyc_stats(request):
 # ---------- Shareholders ----------
 
 def _shareholder_queryset(request):
-    qs = User.objects.filter(is_shareholder=True).order_by('-created_at')
+    qs = User.objects.filter(is_shareholder=True)
     search = (request.query_params.get('search') or '').strip()
     if search:
         qs = qs.filter(
@@ -4047,9 +4051,6 @@ def _shareholder_queryset(request):
             Q(phone__icontains=search) |
             Q(country_code__icontains=search)
         )
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is not None and end_dt is not None:
-        qs = qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
     return qs
 
 
@@ -4070,10 +4071,13 @@ def shareholder_list(request):
             return Response(OwnerSerializer(user, context={'request': request}).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     qs = _shareholder_queryset(request)
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
     ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
     allowed = ['created_at', '-created_at', 'name', '-name', 'balance', '-balance']
     if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
         qs = qs.order_by(ordering)
+    else:
+        qs = qs.order_by('-created_at')
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     data = []
@@ -4274,12 +4278,16 @@ def shareholder_withdrawal_list(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     user_id = request.query_params.get('user_id')
     if user_id:
-        qs = ShareholderWithdrawal.objects.filter(user_id=user_id).select_related('user').order_by('-created_at')
+        qs = ShareholderWithdrawal.objects.filter(user_id=user_id).select_related('user')
     else:
-        qs = ShareholderWithdrawal.objects.all().select_related('user').order_by('-created_at')
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is not None and end_dt is not None:
-        qs = qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
+        qs = ShareholderWithdrawal.objects.all().select_related('user')
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    allowed = ['created_at', '-created_at', 'id', '-id', 'amount', '-amount', 'status', '-status']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
+    else:
+        qs = qs.order_by('-created_at')
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     serializer = ShareholderWithdrawalListSerializer(page, many=True, context={'request': request})
@@ -4603,16 +4611,20 @@ def qr_stand_order_list(request):
             out_serializer = QrStandOrderDetailSerializer(order, context={'request': request})
             return Response(out_serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    qs = QrStandOrder.objects.select_related('restaurant').order_by('-created_at')
+    qs = QrStandOrder.objects.select_related('restaurant')
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None:
         qs = qs.filter(restaurant_id__in=owner_ids)
     status_filter = request.query_params.get('status', '').strip().lower()
     if status_filter in ('pending', 'accepted', 'shipped', 'delivered'):
         qs = qs.filter(status=status_filter)
-    start_dt, end_dt = _parse_date_range(request)
-    if start_dt is not None and end_dt is not None:
-        qs = qs.filter(created_at__date__gte=start_dt.date(), created_at__date__lte=end_dt.date())
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    allowed = ['created_at', '-created_at', 'id', '-id', 'status', '-status']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
+    else:
+        qs = qs.order_by('-created_at')
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     serializer = QrStandOrderListSerializer(page, many=True, context={'request': request})
@@ -4757,7 +4769,7 @@ def notification_list(request):
                 status=status.HTTP_201_CREATED,
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    qs = BulkNotification.objects.select_related('restaurant').order_by('-created_at')
+    qs = BulkNotification.objects.select_related('restaurant')
     owner_ids = _owner_or_manager_restaurant_ids(request)
     if owner_ids is not None:
         qs = qs.filter(restaurant_id__in=owner_ids)
@@ -4767,6 +4779,13 @@ def notification_list(request):
     type_filter = (request.query_params.get('type') or '').strip().lower()
     if type_filter in ('sms', 'whatsapp'):
         qs = qs.filter(type=type_filter)
+    qs = _apply_date_filter_to_queryset(qs, request, 'created_at')
+    ordering = request.query_params.get('ordering') or request.query_params.get('sort') or '-created_at'
+    allowed = ['created_at', '-created_at', 'id', '-id', 'type', '-type']
+    if ordering.lstrip('-') in [f.lstrip('-') for f in allowed]:
+        qs = qs.order_by(ordering)
+    else:
+        qs = qs.order_by('-created_at')
     paginator = StandardPagination()
     page = paginator.paginate_queryset(qs, request)
     serializer = BulkNotificationListSerializer(page, many=True, context={'request': request})
