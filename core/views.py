@@ -2502,6 +2502,21 @@ def order_detail(request, pk):
                 allowed['status'] = new_status
         if not is_kitchen and 'payment_status' in data and data['payment_status']:
             allowed['payment_status'] = data['payment_status'].strip()
+        # table_number / table_id: waiter and manager can update for assign tables
+        if 'table_number' in data:
+            val = (data.get('table_number') or '').strip()
+            allowed['table_number'] = val if val else None
+        if 'table_id' in data:
+            table_id = data.get('table_id')
+            if table_id is None or table_id == '':
+                allowed['table_id'] = None
+            else:
+                try:
+                    tid = int(table_id)
+                    if Table.objects.filter(pk=tid, restaurant_id=order.restaurant_id).exists():
+                        allowed['table_id'] = tid
+                except (TypeError, ValueError):
+                    pass
         if allowed:
             Order.objects.filter(pk=pk).update(**allowed)
             order.refresh_from_db()
