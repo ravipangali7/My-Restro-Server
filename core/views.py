@@ -450,7 +450,19 @@ def restaurant_detail(request, pk):
         return Response({'detail': 'You do not have permission to access this restaurant.'}, status=status.HTTP_403_FORBIDDEN)
     if request.method == 'GET':
         serializer = RestaurantDetailSerializer(rest, context={'request': request})
-        return Response(serializer.data)
+        data = dict(serializer.data)
+        # When requester is the owner of this restaurant, include restaurant_staff (Managers + Staff) for Mini Map section
+        if not request.user.is_superuser and rest.user_id == request.user.id:
+            staff_list = list(
+                Staff.objects.filter(restaurant_id=pk).select_related('user').order_by('-is_manager', 'user__name')
+            )
+            managers = [{'id': s.id, 'name': (s.user.name or '').strip() or f'Manager #{s.id}'} for s in staff_list if s.is_manager]
+            staff = [
+                {'id': s.id, 'name': (s.user.name or '').strip() or (s.designation or '').strip() or f'Staff #{s.id}', 'designation': (s.designation or '').strip() or None}
+                for s in staff_list if not s.is_manager
+            ]
+            data['restaurant_staff'] = {'managers': managers, 'staff': staff}
+        return Response(data)
     if request.method in ('PATCH', 'PUT'):
         serializer = RestaurantCreateUpdateSerializer(rest, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
