@@ -258,12 +258,12 @@ class StaffAdmin(admin.ModelAdmin):
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ('id', 'customer', 'restaurant', 'table', 'order_type', 'status', 'payment_status', 'total', 'created_at')
+    list_display = ('id', 'customer', 'restaurant', 'table', 'order_type', 'status', 'payment_status', 'total', 'address', 'created_at')
     list_filter = ('restaurant', 'status', 'payment_status', 'order_type')
-    search_fields = ('id', 'customer__name', 'customer__phone')
+    search_fields = ('id', 'customer__name', 'customer__phone', 'address')
     autocomplete_fields = ('customer', 'restaurant', 'table', 'waiter')
     inlines = (OrderItemInline,)
-    readonly_fields = ('created_at', 'updated_at')
+    readonly_fields = ('created_at', 'updated_at', 'delivery_latitude', 'delivery_longitude')
 
 
 @admin.register(OrderItem)

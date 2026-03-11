@@ -582,6 +582,14 @@ class Order(models.Model):
     transaction_reference = models.CharField(max_length=255, blank=True, null=True, help_text='Online payment transaction ID (e.g. Esewa)')
     reject_reason = models.TextField(blank=True)
     table_number = models.CharField(max_length=64, blank=True, null=True)
+    delivery_latitude = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True,
+        help_text='Delivery location latitude'
+    )
+    delivery_longitude = models.DecimalField(
+        max_digits=10, decimal_places=7, null=True, blank=True,
+        help_text='Delivery location longitude'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

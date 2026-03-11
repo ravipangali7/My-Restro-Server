@@ -2256,6 +2256,9 @@ def _order_create_response(order, request):
         'created_at': order.created_at.isoformat() if hasattr(order.created_at, 'isoformat') else str(order.created_at),
         'updated_at': order.updated_at.isoformat() if hasattr(order.updated_at, 'isoformat') else str(order.updated_at),
         'items': items,
+        'address': order.address or '',
+        'delivery_latitude': str(order.delivery_latitude) if order.delivery_latitude is not None else None,
+        'delivery_longitude': str(order.delivery_longitude) if order.delivery_longitude is not None else None,
     }
 
 
@@ -2298,6 +2301,17 @@ def orders_list(request):
             table_id = None
         table_number = (data.get('table_number') or '').strip() or None
         address = (data.get('address') or '').strip() or None
+        delivery_latitude = None
+        delivery_longitude = None
+        if order_type == OrderType.DELIVERY and data.get('latitude') is not None and data.get('longitude') is not None:
+            try:
+                lat_val = float(data.get('latitude'))
+                lng_val = float(data.get('longitude'))
+                if -90 <= lat_val <= 90 and -180 <= lng_val <= 180:
+                    delivery_latitude = Decimal(str(round(lat_val, 7)))
+                    delivery_longitude = Decimal(str(round(lng_val, 7)))
+            except (TypeError, ValueError):
+                pass
         sent_charge = data.get('service_charge')
         if sent_charge is not None and sent_charge != '':
             try:
@@ -2380,6 +2394,8 @@ def orders_list(request):
             table_number=table_number,
             order_type=order_type,
             address=address,
+            delivery_latitude=delivery_latitude,
+            delivery_longitude=delivery_longitude,
             status='pending',
             payment_status='pending',
             payment_method=payment_method or '',
@@ -2449,6 +2465,9 @@ def orders_list(request):
             'waiter_id': o.waiter_id,
             'waiter_name': o.waiter.user.name if o.waiter and o.waiter.user_id else '',
             'created_at': o.created_at.isoformat() if hasattr(o.created_at, 'isoformat') else str(o.created_at),
+            'address': o.address or '',
+            'delivery_latitude': str(o.delivery_latitude) if o.delivery_latitude is not None else None,
+            'delivery_longitude': str(o.delivery_longitude) if o.delivery_longitude is not None else None,
         }
         for o in page
     ]
@@ -2564,6 +2583,9 @@ def order_detail(request, pk):
         'created_at': order.created_at.isoformat() if hasattr(order.created_at, 'isoformat') else str(order.created_at),
         'updated_at': order.updated_at.isoformat() if hasattr(order.updated_at, 'isoformat') else str(order.updated_at),
         'items': items,
+        'address': order.address or '',
+        'delivery_latitude': str(order.delivery_latitude) if order.delivery_latitude is not None else None,
+        'delivery_longitude': str(order.delivery_longitude) if order.delivery_longitude is not None else None,
     })
 
 
@@ -6123,6 +6145,17 @@ def _customer_order_create(request):
     table_id = data.get('table_id')
     table_number = (data.get('table_number') or '').strip() or None
     address = (data.get('address') or '').strip() or None
+    delivery_latitude = None
+    delivery_longitude = None
+    if data.get('latitude') is not None and data.get('longitude') is not None:
+        try:
+            lat_val = float(data.get('latitude'))
+            lng_val = float(data.get('longitude'))
+            if -90 <= lat_val <= 90 and -180 <= lng_val <= 180:
+                delivery_latitude = Decimal(str(round(lat_val, 7)))
+                delivery_longitude = Decimal(str(round(lng_val, 7)))
+        except (TypeError, ValueError):
+            pass
     # Optional table_id: must belong to this restaurant
     if table_id is not None:
         try:
@@ -6194,6 +6227,8 @@ def _customer_order_create(request):
         table_number=table_number,
         order_type=order_type_raw,
         address=address,
+        delivery_latitude=delivery_latitude,
+        delivery_longitude=delivery_longitude,
         status='pending',
         payment_status='pending',
         payment_method=payment_method or '',
@@ -6278,6 +6313,7 @@ def customer_orders_list(request):
             'payment_status': o.payment_status,
             'items_count': getattr(o, 'items_count', 0),
             'created_at': o.created_at.isoformat() if hasattr(o.created_at, 'isoformat') else str(o.created_at),
+            'address': o.address or '',
         })
     resp = paginator.get_paginated_response(results)
     resp.data['stats'] = {'total_orders': total_orders, 'pending_count': pending_count, 'paid_count': paid_count}
@@ -6315,6 +6351,9 @@ def _customer_order_detail_response(order, cust):
         'created_at': order.created_at.isoformat() if hasattr(order.created_at, 'isoformat') else str(order.created_at),
         'items': items,
         'has_feedback': has_feedback,
+        'address': order.address or '',
+        'delivery_latitude': str(order.delivery_latitude) if order.delivery_latitude is not None else None,
+        'delivery_longitude': str(order.delivery_longitude) if order.delivery_longitude is not None else None,
     }
 
 
