@@ -2259,6 +2259,9 @@ def _order_create_response(order, request):
         'address': order.address or '',
         'delivery_latitude': str(order.delivery_latitude) if order.delivery_latitude is not None else None,
         'delivery_longitude': str(order.delivery_longitude) if order.delivery_longitude is not None else None,
+        'location_name': order.location_name or '',
+        'latitude': str(order.latitude) if order.latitude is not None else None,
+        'longitude': str(order.longitude) if order.longitude is not None else None,
     }
 
 
@@ -2301,8 +2304,13 @@ def orders_list(request):
             table_id = None
         table_number = (data.get('table_number') or '').strip() or None
         address = (data.get('address') or '').strip() or None
+        location_name = (data.get('location_name') or '').strip() or None
+        if location_name is None and address:
+            location_name = address
         delivery_latitude = None
         delivery_longitude = None
+        order_latitude = None
+        order_longitude = None
         if order_type == OrderType.DELIVERY and data.get('latitude') is not None and data.get('longitude') is not None:
             try:
                 lat_val = float(data.get('latitude'))
@@ -2310,8 +2318,12 @@ def orders_list(request):
                 if -90 <= lat_val <= 90 and -180 <= lng_val <= 180:
                     delivery_latitude = Decimal(str(round(lat_val, 7)))
                     delivery_longitude = Decimal(str(round(lng_val, 7)))
+                    order_latitude = Decimal(str(round(lat_val, 6)))
+                    order_longitude = Decimal(str(round(lng_val, 6)))
             except (TypeError, ValueError):
                 pass
+        if location_name and not address:
+            address = location_name
         sent_charge = data.get('service_charge')
         if sent_charge is not None and sent_charge != '':
             try:
@@ -2396,6 +2408,9 @@ def orders_list(request):
             address=address,
             delivery_latitude=delivery_latitude,
             delivery_longitude=delivery_longitude,
+            location_name=location_name,
+            latitude=order_latitude,
+            longitude=order_longitude,
             status='pending',
             payment_status='pending',
             payment_method=payment_method or '',
@@ -2468,6 +2483,9 @@ def orders_list(request):
             'address': o.address or '',
             'delivery_latitude': str(o.delivery_latitude) if o.delivery_latitude is not None else None,
             'delivery_longitude': str(o.delivery_longitude) if o.delivery_longitude is not None else None,
+            'location_name': o.location_name or '',
+            'latitude': str(o.latitude) if o.latitude is not None else None,
+            'longitude': str(o.longitude) if o.longitude is not None else None,
         }
         for o in page
     ]
@@ -2586,6 +2604,9 @@ def order_detail(request, pk):
         'address': order.address or '',
         'delivery_latitude': str(order.delivery_latitude) if order.delivery_latitude is not None else None,
         'delivery_longitude': str(order.delivery_longitude) if order.delivery_longitude is not None else None,
+        'location_name': order.location_name or '',
+        'latitude': str(order.latitude) if order.latitude is not None else None,
+        'longitude': str(order.longitude) if order.longitude is not None else None,
     })
 
 
@@ -6145,8 +6166,13 @@ def _customer_order_create(request):
     table_id = data.get('table_id')
     table_number = (data.get('table_number') or '').strip() or None
     address = (data.get('address') or '').strip() or None
+    location_name = (data.get('location_name') or '').strip() or None
+    if location_name is None and address:
+        location_name = address
     delivery_latitude = None
     delivery_longitude = None
+    order_latitude = None
+    order_longitude = None
     if data.get('latitude') is not None and data.get('longitude') is not None:
         try:
             lat_val = float(data.get('latitude'))
@@ -6154,8 +6180,12 @@ def _customer_order_create(request):
             if -90 <= lat_val <= 90 and -180 <= lng_val <= 180:
                 delivery_latitude = Decimal(str(round(lat_val, 7)))
                 delivery_longitude = Decimal(str(round(lng_val, 7)))
+                order_latitude = Decimal(str(round(lat_val, 6)))
+                order_longitude = Decimal(str(round(lng_val, 6)))
         except (TypeError, ValueError):
             pass
+    if location_name and not address:
+        address = location_name
     # Optional table_id: must belong to this restaurant
     if table_id is not None:
         try:
@@ -6229,6 +6259,9 @@ def _customer_order_create(request):
         address=address,
         delivery_latitude=delivery_latitude,
         delivery_longitude=delivery_longitude,
+        location_name=location_name,
+        latitude=order_latitude,
+        longitude=order_longitude,
         status='pending',
         payment_status='pending',
         payment_method=payment_method or '',
@@ -6314,6 +6347,7 @@ def customer_orders_list(request):
             'items_count': getattr(o, 'items_count', 0),
             'created_at': o.created_at.isoformat() if hasattr(o.created_at, 'isoformat') else str(o.created_at),
             'address': o.address or '',
+            'location_name': o.location_name or '',
         })
     resp = paginator.get_paginated_response(results)
     resp.data['stats'] = {'total_orders': total_orders, 'pending_count': pending_count, 'paid_count': paid_count}
@@ -6354,6 +6388,9 @@ def _customer_order_detail_response(order, cust):
         'address': order.address or '',
         'delivery_latitude': str(order.delivery_latitude) if order.delivery_latitude is not None else None,
         'delivery_longitude': str(order.delivery_longitude) if order.delivery_longitude is not None else None,
+        'location_name': order.location_name or '',
+        'latitude': str(order.latitude) if order.latitude is not None else None,
+        'longitude': str(order.longitude) if order.longitude is not None else None,
     }
 
 
